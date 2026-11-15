@@ -4,8 +4,11 @@
 #include "sip/pj_account.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,15 +30,19 @@ public:
     void remove_account(const AccountId& id);
 
     sip::PjAccount& account(const AccountId& id);
+    std::string account_uri(const AccountId& id) const;
     std::vector<AccountSnapshot> accounts() const;
 
     void unregister_all() noexcept;
     void clear() noexcept;
+    bool wait_until_registration_settled(
+        std::chrono::milliseconds timeout);
 
 private:
     struct AccountRecord {
         std::unique_ptr<sip::PjAccount> adapter;
         AccountSnapshot snapshot;
+        bool registrationPending = false;
     };
 
     void registration_changed(
@@ -44,14 +51,18 @@ private:
         const pj::OnRegStateParam& param) override;
 
     void incoming_call(sip::PjAccount& account,
-                       int native_call_id) override;
+                       int native_call_id,
+                       const std::string& remoteSdp) override;
 
     AccountRecord& find_account(const AccountId& id);
+    const AccountRecord& find_account(const AccountId& id) const;
     void update_registration(const AccountId& id,
                              const pj::AccountInfo& info,
                              pj_status_t transport_status,
                              pjsip_status_code sip_status,
                              const std::string& reason);
+    void mark_registration_pending(AccountRecord& record);
+    void clear_registration_pending(AccountRecord& record);
     void publish_account_event(const AccountId& id,
                                AccountState state,
                                const std::string& reason,
@@ -61,6 +72,9 @@ private:
     IncomingCallSink& incoming_calls_;
     std::unordered_map<std::string, AccountRecord> accounts_;
     std::atomic<std::uint64_t> next_account_id_{0};
+    std::atomic<std::size_t> pending_registrations_{0};
+    mutable std::mutex registration_mutex_;
+    mutable std::condition_variable registration_condition_;
 };
 
 } // namespace iris::core

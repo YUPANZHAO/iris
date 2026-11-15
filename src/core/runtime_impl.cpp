@@ -2,8 +2,11 @@
 
 #include "core/account_manager.h"
 #include "core/call_manager.h"
+#include "media/engine/media_engine.h"
+#include "media/transport/pj_ioqueue_service.h"
 
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -91,6 +94,37 @@ void RuntimeImpl::resume_call(const CallId& id) {
     }).get();
 }
 
+void RuntimeImpl::set_audio_muted(const CallId& id, bool muted) {
+    dispatcher_.invoke([this, id, muted] {
+        const auto result = media_engine_->setAudioMuted(id, muted);
+        if (!result.ok) {
+            throw std::runtime_error(result.error);
+        }
+    }).get();
+}
+
+void RuntimeImpl::set_video_muted(const CallId& id, bool muted) {
+    dispatcher_.invoke([this, id, muted] {
+        const auto result = media_engine_->setVideoMuted(id, muted);
+        if (!result.ok) {
+            throw std::runtime_error(result.error);
+        }
+    }).get();
+}
+
+void RuntimeImpl::set_media_input(MediaKind kind,
+                                  const std::string& source) {
+    dispatcher_.invoke([this, kind, source] {
+        media_engine_->setInputSource(kind, source);
+    }).get();
+}
+
+std::string RuntimeImpl::media_input(MediaKind kind) const {
+    return dispatcher_.invoke([this, kind] {
+        return media_engine_->inputSource(kind);
+    }).get();
+}
+
 std::vector<AccountSnapshot> RuntimeImpl::accounts() const {
     return dispatcher_.invoke([this] {
         return account_manager_->accounts();
@@ -100,6 +134,12 @@ std::vector<AccountSnapshot> RuntimeImpl::accounts() const {
 std::vector<CallSnapshot> RuntimeImpl::calls() const {
     return dispatcher_.invoke([this] {
         return call_manager_->calls();
+    }).get();
+}
+
+MediaStats RuntimeImpl::media_stats(const CallId& id) const {
+    return dispatcher_.invoke([this, id] {
+        return media_engine_->stats(id);
     }).get();
 }
 
@@ -120,21 +160,38 @@ bool RuntimeImpl::post_callback(std::function<void()> task) {
     return dispatcher_.post(std::move(task));
 }
 
+void RuntimeImpl::invoke_on_core(std::function<void()> task) {
+    if (dispatcher_.is_worker_thread()) {
+        task();
+        return;
+    }
+    dispatcher_.invoke(std::move(task)).get();
+}
+
 void RuntimeImpl::accept_incoming_call(sip::PjAccount& account,
                                        const AccountId& account_id,
-                                       int native_call_id) {
+                                       int native_call_id,
+                                       const std::string& remoteSdp) {
     if (call_manager_) {
         call_manager_->accept_incoming_call(
-            account, account_id, native_call_id);
+            account, account_id, native_call_id, remoteSdp);
     }
 }
 
 void RuntimeImpl::initialize() {
     endpoint_.initialize(config_);
+    io_service_ =
+        std::make_unique<media::PjIoqueueService>();
+    if (!io_service_->ok()) {
+        throw std::runtime_error(io_service_->error());
+    }
+    media_engine_ = std::make_unique<media::MediaEngine>(
+        std::move(config_.media), *io_service_);
     account_manager_ =
         std::make_unique<core::AccountManager>(*this, *this);
     call_manager_ =
-        std::make_unique<core::CallManager>(*this, *account_manager_);
+        std::make_unique<core::CallManager>(
+            *this, *account_manager_, *media_engine_);
 }
 
 void RuntimeImpl::shutdown() noexcept {
@@ -144,25 +201,38 @@ void RuntimeImpl::shutdown() noexcept {
 
     try {
         dispatcher_.invoke([this] {
-            dispatcher_.close_queue();
-
             if (call_manager_) {
                 call_manager_->hangup_all();
             }
             if (account_manager_) {
                 account_manager_->unregister_all();
             }
+        }).get();
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        if (call_manager_) {
+            call_manager_->wait_until_empty(
+                std::chrono::seconds(3));
+        }
+        if (account_manager_) {
+            account_manager_->wait_until_registration_settled(
+                std::chrono::seconds(3));
+        }
 
+        dispatcher_.invoke([this] {
+            dispatcher_.close_queue();
             if (call_manager_) {
                 call_manager_->clear();
             }
             if (account_manager_) {
                 account_manager_->clear();
             }
+            if (media_engine_) {
+                media_engine_->stopAll();
+            }
 
             call_manager_.reset();
+            media_engine_.reset();
+            io_service_.reset();
             account_manager_.reset();
             endpoint_.shutdown();
         }).get();

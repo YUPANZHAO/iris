@@ -37,6 +37,9 @@ public:
 
     void close_queue();
     void stop();
+    bool is_worker_thread() const noexcept {
+        return std::this_thread::get_id() == worker_.get_id();
+    }
 
 private:
     void run();

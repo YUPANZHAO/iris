@@ -63,12 +63,32 @@ void Runtime::resumeCall(const CallId& id) {
     impl_->resume_call(id);
 }
 
+void Runtime::setAudioMuted(const CallId& id, bool muted) {
+    impl_->set_audio_muted(id, muted);
+}
+
+void Runtime::setVideoMuted(const CallId& id, bool muted) {
+    impl_->set_video_muted(id, muted);
+}
+
+void Runtime::setMediaInput(MediaKind kind, const std::string& source) {
+    impl_->set_media_input(kind, source);
+}
+
+std::string Runtime::mediaInput(MediaKind kind) const {
+    return impl_->media_input(kind);
+}
+
 std::vector<AccountSnapshot> Runtime::accounts() const {
     return impl_->accounts();
 }
 
 std::vector<CallSnapshot> Runtime::calls() const {
     return impl_->calls();
+}
+
+MediaStats Runtime::mediaStats(const CallId& id) const {
+    return impl_->media_stats(id);
 }
 
 std::vector<Event> Runtime::pollEvents() {

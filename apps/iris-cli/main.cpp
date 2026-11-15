@@ -1,14 +1,20 @@
 #include "iris/iris.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <exception>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
+
+std::mutex console_mutex;
 
 std::string trim(const std::string& value) {
     auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char ch) {
@@ -49,6 +55,15 @@ void print_help() {
         << "  call hangup <call-id>\n"
         << "  call hold <call-id>\n"
         << "  call resume <call-id>\n"
+        << "  media mute-audio <call-id>\n"
+        << "  media unmute-audio <call-id>\n"
+        << "  media mute-video <call-id>\n"
+        << "  media unmute-video <call-id>\n"
+        << "  media stats <call-id>\n"
+        << "  media devices\n"
+        << "  media source\n"
+        << "  media source audio <index|id|auto|null>\n"
+        << "  media source video <index|id|auto|null>\n"
         << "  events\n"
         << "  help\n"
         << "  quit\n";
@@ -56,6 +71,7 @@ void print_help() {
 
 void print_events(iris::Runtime& runtime) {
     auto events = runtime.pollEvents();
+    std::lock_guard<std::mutex> lock(console_mutex);
     for (const auto& event : events) {
         std::cout << "[event " << event.sequence << "] "
                   << iris::to_string(event.type);
@@ -81,6 +97,55 @@ void print_events(iris::Runtime& runtime) {
         }
         std::cout << '\n';
     }
+}
+
+void print_media_stats(iris::Runtime& runtime, const iris::CallId& id) {
+    const auto stats = runtime.mediaStats(id);
+    std::lock_guard<std::mutex> lock(console_mutex);
+    std::cout << "media " << id
+              << " packets-sent=" << stats.packetsSent
+              << " send-errors=" << stats.sendErrors
+              << " packets-received=" << stats.packetsReceived
+              << " packets-lost=" << stats.packetsLost
+              << " bytes-sent=" << stats.bytesSent
+              << " bytes-received=" << stats.bytesReceived
+              << " audio-frames=" << stats.audioFramesDecoded
+              << " video-frames=" << stats.videoFramesDecoded << '\n';
+}
+
+void print_device_catalog(iris::MediaKind kind,
+                          const iris::MediaDeviceCatalog& catalog) {
+    std::cout << iris::to_string(kind) << " devices:\n";
+    if (!catalog.ok()) {
+        std::cout << "  error: " << catalog.error << '\n';
+        return;
+    }
+    if (catalog.devices.empty()) {
+        std::cout << "  none\n";
+        return;
+    }
+    for (std::size_t index = 0;
+         index < catalog.devices.size();
+         ++index) {
+        const auto& device = catalog.devices[index];
+        std::cout << "  [" << index << "]"
+                  << (device.isDefault ? " (default)" : "")
+                  << " " << device.name << '\n'
+                  << "      id: " << device.id << '\n';
+    }
+}
+
+void print_media_sources(iris::Runtime& runtime) {
+    print_device_catalog(
+        iris::MediaKind::Audio,
+        iris::queryMediaDevices(iris::MediaKind::Audio));
+    print_device_catalog(
+        iris::MediaKind::Video,
+        iris::queryMediaDevices(iris::MediaKind::Video));
+    std::cout << "current audio source: "
+              << runtime.mediaInput(iris::MediaKind::Audio) << '\n'
+              << "current video source: "
+              << runtime.mediaInput(iris::MediaKind::Video) << '\n';
 }
 
 void print_accounts(iris::Runtime& runtime) {
@@ -139,7 +204,44 @@ int repl(const iris::RuntimeConfig& config) {
     iris::Runtime runtime(config);
     std::cout << "Iris CLI " << runtime.version()
               << " (pjproject " << runtime.pjprojectVersion() << ")\n"
+              << "media audio=" << (config.media.audioEnabled ? "on" : "off")
+              << " video=" << (config.media.videoEnabled ? "on" : "off")
+              << " source=" << config.media.audioInput << " / "
+              << config.media.videoInput << "\n"
               << "Type 'help' for commands.\n";
+
+    std::atomic<bool> auto_answer_stop{false};
+    std::thread auto_answer_thread;
+    if (config.autoAnswerCalls) {
+        auto_answer_thread = std::thread([&] {
+            while (!auto_answer_stop.load()) {
+                auto events = runtime.pollEvents();
+                for (const auto& event : events) {
+                    std::lock_guard<std::mutex> lock(console_mutex);
+                    std::cout << "[event " << event.sequence << "] "
+                              << iris::to_string(event.type)
+                              << " call=" << event.callId
+                              << " state=" << iris::to_string(event.callState);
+                    if (!event.remoteUri.empty()) {
+                        std::cout << " remote=" << event.remoteUri;
+                    }
+                    std::cout << '\n';
+                    if (event.type == iris::EventType::IncomingCall &&
+                        !event.callId.empty()) {
+                        try {
+                            runtime.answerCall(event.callId);
+                            std::cout << "Auto-answered " << event.callId << '\n';
+                        } catch (const std::exception& error) {
+                            std::cerr << "auto-answer error: "
+                                      << error.what() << '\n';
+                        }
+                    }
+                }
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(100));
+            }
+        });
+    }
 
     std::string line;
     while (true) {
@@ -218,6 +320,44 @@ int repl(const iris::RuntimeConfig& config) {
             } else if (command == "call" && tokens.size() == 3 &&
                        tokens[1] == "resume") {
                 runtime.resumeCall({tokens[2]});
+            } else if (command == "media" && tokens.size() == 3 &&
+                       tokens[1] == "mute-audio") {
+                runtime.setAudioMuted({tokens[2]}, true);
+            } else if (command == "media" && tokens.size() == 3 &&
+                       tokens[1] == "unmute-audio") {
+                runtime.setAudioMuted({tokens[2]}, false);
+            } else if (command == "media" && tokens.size() == 3 &&
+                       tokens[1] == "mute-video") {
+                runtime.setVideoMuted({tokens[2]}, true);
+            } else if (command == "media" && tokens.size() == 3 &&
+                       tokens[1] == "unmute-video") {
+                runtime.setVideoMuted({tokens[2]}, false);
+            } else if (command == "media" && tokens.size() == 3 &&
+                       tokens[1] == "stats") {
+                print_media_stats(runtime, {tokens[2]});
+            } else if (command == "media" && tokens.size() == 2 &&
+                       tokens[1] == "devices") {
+                print_media_sources(runtime);
+            } else if (command == "media" && tokens.size() == 2 &&
+                       tokens[1] == "source") {
+                std::cout << "current audio source: "
+                          << runtime.mediaInput(iris::MediaKind::Audio)
+                          << '\n'
+                          << "current video source: "
+                          << runtime.mediaInput(iris::MediaKind::Video)
+                          << '\n';
+            } else if (command == "media" && tokens.size() == 4 &&
+                       tokens[1] == "source" &&
+                       tokens[2] == "audio") {
+                runtime.setMediaInput(iris::MediaKind::Audio, tokens[3]);
+                std::cout << "audio source set to " << tokens[3]
+                          << " for subsequent calls\n";
+            } else if (command == "media" && tokens.size() == 4 &&
+                       tokens[1] == "source" &&
+                       tokens[2] == "video") {
+                runtime.setMediaInput(iris::MediaKind::Video, tokens[3]);
+                std::cout << "video source set to " << tokens[3]
+                          << " for subsequent calls\n";
             } else {
                 std::cout << "Unknown or incomplete command. Type 'help'.\n";
             }
@@ -228,6 +368,10 @@ int repl(const iris::RuntimeConfig& config) {
         }
     }
 
+    auto_answer_stop = true;
+    if (auto_answer_thread.joinable()) {
+        auto_answer_thread.join();
+    }
     print_events(runtime);
     return 0;
 }
@@ -237,28 +381,78 @@ int repl(const iris::RuntimeConfig& config) {
 int main(int argc, char* argv[]) {
     iris::RuntimeConfig config;
     bool run_self_test = false;
+    bool list_devices = false;
 
     try {
         for (int index = 1; index < argc; ++index) {
             const std::string argument = argv[index];
             if (argument == "--self-test") {
                 run_self_test = true;
+            } else if (argument == "--list-devices") {
+                list_devices = true;
             } else if (argument == "--help" || argument == "-h") {
                 std::cout
                     << "Usage: iris-cli [--self-test] [--sip-port PORT] "
-                       "[--log-level LEVEL]\n";
+                       "[--log-level LEVEL] [--audio-input SOURCE] "
+                       "[--video-input SOURCE] [--audio-device SELECTOR] "
+                       "[--video-device SELECTOR] [--list-devices] "
+                       "[--media-address ADDRESS] "
+                       "[--no-audio] [--no-video] [--auto-answer]\n";
                 return 0;
             } else if (argument == "--sip-port" && index + 1 < argc) {
                 config.sipPort = static_cast<unsigned>(
                     std::stoul(argv[++index]));
             } else if (argument == "--log-level" && index + 1 < argc) {
                 config.logLevel = std::stoi(argv[++index]);
+            } else if (argument == "--audio-input" && index + 1 < argc) {
+                config.media.audioInput = argv[++index];
+            } else if (argument == "--audio-device" &&
+                       index + 1 < argc) {
+                config.media.audioInput = argv[++index];
+            } else if (argument == "--video-input" && index + 1 < argc) {
+                config.media.videoInput = argv[++index];
+            } else if (argument == "--video-device" &&
+                       index + 1 < argc) {
+                config.media.videoInput = argv[++index];
+            } else if (argument == "--media-address" && index + 1 < argc) {
+                config.media.mediaAddress = argv[++index];
+            } else if (argument == "--video-width" && index + 1 < argc) {
+                config.media.videoWidth = std::stoi(argv[++index]);
+            } else if (argument == "--video-height" && index + 1 < argc) {
+                config.media.videoHeight = std::stoi(argv[++index]);
+            } else if (argument == "--video-fps" && index + 1 < argc) {
+                config.media.videoFps = std::stoi(argv[++index]);
+            } else if (argument == "--audio-bitrate" && index + 1 < argc) {
+                config.media.audioBitrateKbps = std::stoi(argv[++index]);
+            } else if (argument == "--video-bitrate" && index + 1 < argc) {
+                config.media.videoBitrateKbps = std::stoi(argv[++index]);
+            } else if (argument == "--no-audio") {
+                config.media.audioEnabled = false;
+            } else if (argument == "--no-video") {
+                config.media.videoEnabled = false;
+            } else if (argument == "--no-audio-render") {
+                config.media.renderAudio = false;
+            } else if (argument == "--no-video-render") {
+                config.media.renderVideo = false;
+            } else if (argument == "--auto-answer") {
+                config.autoAnswerCalls = true;
             } else {
                 std::cerr << "Unknown argument: " << argument << '\n';
                 return 2;
             }
         }
 
+        if (list_devices) {
+            print_device_catalog(
+                iris::MediaKind::Audio,
+                iris::queryMediaDevices(iris::MediaKind::Audio));
+            print_device_catalog(
+                iris::MediaKind::Video,
+                iris::queryMediaDevices(iris::MediaKind::Video));
+            std::cout << "Use --audio-device <index|id|auto|null> and "
+                         "--video-device <index|id|auto|null>.\n";
+            return 0;
+        }
         if (run_self_test) {
             return self_test(config);
         }

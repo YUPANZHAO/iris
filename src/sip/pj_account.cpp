@@ -1,5 +1,7 @@
 #include "sip/pj_account.h"
 
+#include "sip/sip_message.h"
+
 namespace iris::sip {
 
 PjAccount::PjAccount(AccountCallbackHandler& handler,
@@ -10,6 +12,7 @@ PjAccount::PjAccount(AccountCallbackHandler& handler,
     account_config.idUri = config.idUri;
     account_config.regConfig.registrarUri = config.registrarUri;
     account_config.regConfig.registerOnAdd = false;
+    account_config.callConfig.mediaAppManaged = true;
 
     if (!config.username.empty()) {
         account_config.sipConfig.authCreds.push_back(
@@ -35,7 +38,8 @@ void PjAccount::onRegState(pj::OnRegStateParam& param) {
 }
 
 void PjAccount::onIncomingCall(pj::OnIncomingCallParam& param) {
-    handler_->incoming_call(*this, param.callId);
+    handler_->incoming_call(
+        *this, param.callId, sip::extract_sdp_body(param.rdata.wholeMsg));
 }
 
 } // namespace iris::sip

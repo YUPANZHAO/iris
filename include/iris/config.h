@@ -1,5 +1,7 @@
 #pragma once
 
+#include "iris/media.h"
+
 #include <string>
 
 namespace iris {
@@ -8,6 +10,8 @@ struct RuntimeConfig {
     unsigned sipPort = 0;
     int logLevel = 3;
     bool nullAudioDevice = true;
+    bool autoAnswerCalls = false;
+    MediaRuntimeConfig media;
 };
 
 struct AccountConfig {

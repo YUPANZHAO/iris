@@ -1,6 +1,7 @@
 #include "core/call_manager.h"
 
 #include "internal/identifier.h"
+#include "media/engine/media_engine.h"
 #include "sip/state_mapper.h"
 
 #include <algorithm>
@@ -10,8 +11,9 @@
 namespace iris::core {
 
 CallManager::CallManager(RuntimeServices& services,
-                         AccountManager& accounts)
-    : services_(services), accounts_(accounts) {
+                         AccountManager& accounts,
+                         iris::media::MediaEngine& media)
+    : services_(services), accounts_(accounts), media_(media) {
 }
 
 CallManager::~CallManager() = default;
@@ -29,6 +31,12 @@ CallId CallManager::start_call(const AccountId& account_id,
     auto call = std::make_shared<sip::PjCall>(
         account, *this, call_id, account_id);
 
+    const auto local_uri = accounts_.account_uri(account_id);
+    auto offer = media_.prepareOutgoing(call_id, local_uri);
+    if (!offer.ok) {
+        throw std::runtime_error("failed to prepare media: " + offer.error);
+    }
+
     CallSnapshot snapshot;
     snapshot.id = call_id;
     snapshot.accountId = account_id;
@@ -36,15 +44,26 @@ CallId CallManager::start_call(const AccountId& account_id,
     snapshot.state = CallState::Outgoing;
     snapshot.stateText = "outgoing call initiated";
 
-    calls_.emplace(call_id.value, CallRecord{call, snapshot});
+    calls_.emplace(call_id.value, CallRecord{
+        call, snapshot, offer.sdp, false, PendingOperation::None
+    });
+    call_count_.fetch_add(1, std::memory_order_release);
 
     try {
         pj::CallOpParam param(true);
-        param.opt.audioCount = 0;
-        param.opt.videoCount = 0;
+        param.opt.audioCount = media_.audioEnabled() ? 1 : 0;
+        param.opt.videoCount = media_.videoEnabled() ? 1 : 0;
+        param.opt.flag |= PJSUA_CALL_MEDIA_APP_MANAGED;
+        param.sdp.wholeSdp = offer.sdp;
         call->makeCall(destination_uri, param);
     } catch (...) {
+        media_.stop(call_id);
         calls_.erase(call_id.value);
+        {
+            std::lock_guard<std::mutex> lock(call_count_mutex_);
+            call_count_.fetch_sub(1, std::memory_order_release);
+        }
+        call_count_condition_.notify_all();
         throw;
     }
 
@@ -54,11 +73,20 @@ CallId CallManager::start_call(const AccountId& account_id,
 }
 
 void CallManager::answer_call(const CallId& id) {
-    auto call = find_call(id);
-    pj::CallOpParam param(false);
+    auto iterator = calls_.find(id.value);
+    if (iterator == calls_.end()) {
+        throw std::out_of_range("unknown or terminated call: " + id.value);
+    }
+    if (iterator->second.answerSdp.empty()) {
+        throw std::runtime_error("media answer is not prepared");
+    }
+    auto call = iterator->second.adapter;
+    pj::CallOpParam param(true);
     param.statusCode = PJSIP_SC_OK;
-    param.opt.audioCount = 0;
-    param.opt.videoCount = 0;
+    param.opt.audioCount = media_.audioEnabled() ? 1 : 0;
+    param.opt.videoCount = media_.videoEnabled() ? 1 : 0;
+    param.opt.flag |= PJSUA_CALL_MEDIA_APP_MANAGED;
+    param.sdp.wholeSdp = iterator->second.answerSdp;
     call->answer(param);
 }
 
@@ -77,30 +105,61 @@ void CallManager::hangup_call(const CallId& id) {
 
 void CallManager::hold_call(const CallId& id) {
     auto call = find_call(id);
+    auto offer = media_.createReinviteOffer(
+        id, MediaDirection::SendOnly, MediaDirection::SendOnly);
+    if (!offer.ok) {
+        throw std::runtime_error(
+            "failed to create hold SDP: " + offer.error);
+    }
     pj::CallOpParam param(false);
-    call->setHold(param);
+    param.opt.audioCount = media_.audioEnabled() ? 1 : 0;
+    param.opt.videoCount = media_.videoEnabled() ? 1 : 0;
+    param.opt.flag |= PJSUA_CALL_MEDIA_APP_MANAGED;
+    param.sdp.wholeSdp = std::move(offer.sdp);
 
     auto iterator = calls_.find(id.value);
-    if (iterator != calls_.end()) {
-        iterator->second.snapshot.state = CallState::LocallyHeld;
-        iterator->second.snapshot.stateText = "locally held";
+    if (iterator == calls_.end()) {
+        throw std::out_of_range("unknown call: " + id.value);
+    }
+    try {
+        call->reinvite(param);
+        iterator->second.pendingOperation = PendingOperation::Hold;
+        iterator->second.snapshot.stateText = "local hold requested";
         publish_call_event(
             iterator->second.snapshot, "local hold requested", 0);
+    } catch (...) {
+        iterator->second.pendingOperation = PendingOperation::None;
+        throw;
     }
 }
 
 void CallManager::resume_call(const CallId& id) {
     auto call = find_call(id);
+    auto offer = media_.createReinviteOffer(
+        id, MediaDirection::SendRecv, MediaDirection::SendRecv);
+    if (!offer.ok) {
+        throw std::runtime_error(
+            "failed to create resume SDP: " + offer.error);
+    }
     pj::CallOpParam param(false);
-    param.opt.flag = PJSUA_CALL_UNHOLD;
-    call->reinvite(param);
+    param.opt.audioCount = media_.audioEnabled() ? 1 : 0;
+    param.opt.videoCount = media_.videoEnabled() ? 1 : 0;
+    param.opt.flag |= PJSUA_CALL_MEDIA_APP_MANAGED;
+    param.sdp.wholeSdp = std::move(offer.sdp);
 
     auto iterator = calls_.find(id.value);
-    if (iterator != calls_.end()) {
-        iterator->second.snapshot.state = CallState::Confirmed;
+    if (iterator == calls_.end()) {
+        throw std::out_of_range("unknown call: " + id.value);
+    }
+    try {
+        call->reinvite(param);
+        iterator->second.pendingOperation = PendingOperation::Resume;
         iterator->second.snapshot.stateText = "resume requested";
         publish_call_event(
             iterator->second.snapshot, "call resume requested", 0);
+    } catch (...) {
+        iterator->second.pendingOperation = PendingOperation::None;
+        throw;
     }
 }
 
@@ -129,7 +188,8 @@ bool CallManager::has_active_call_for(const AccountId& account_id) const {
 
 void CallManager::accept_incoming_call(sip::PjAccount& account,
                                        const AccountId& account_id,
-                                       int native_call_id) {
+                                       int native_call_id,
+                                       const std::string& remoteSdp) {
     std::shared_ptr<sip::PjCall> call;
     try {
         auto call_id = CallId{
@@ -148,8 +208,8 @@ void CallManager::accept_incoming_call(sip::PjAccount& account,
         return;
     }
 
-    if (!services_.post_callback([this, call, info] {
-            adopt_incoming_call(call, info);
+    if (!services_.post_callback([this, call, info, remoteSdp] {
+            adopt_incoming_call(call, info, remoteSdp);
         })) {
         try {
             pj::CallOpParam reply(false);
@@ -171,7 +231,24 @@ void CallManager::hangup_all() noexcept {
 }
 
 void CallManager::clear() noexcept {
+    for (const auto& entry : calls_) {
+        media_.stop(CallId{entry.first});
+    }
     calls_.clear();
+    {
+        std::lock_guard<std::mutex> lock(call_count_mutex_);
+        call_count_.store(0, std::memory_order_release);
+    }
+    call_count_condition_.notify_all();
+}
+
+bool CallManager::wait_until_empty(
+    std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(call_count_mutex_);
+    return call_count_condition_.wait_for(
+        lock, timeout, [this] {
+            return call_count_.load(std::memory_order_acquire) == 0;
+        });
 }
 
 void CallManager::call_state_changed(CallId id,
@@ -181,9 +258,145 @@ void CallManager::call_state_changed(CallId id,
     });
 }
 
+void CallManager::remote_sdp_received(CallId id,
+                                      const std::string& sdp) {
+    services_.post_callback([this, id, sdp] {
+        apply_remote_sdp(id, sdp);
+    });
+}
+
+bool CallManager::remote_reinvite_received(
+    CallId id,
+    const std::string& offer) {
+    return services_.post_callback([this, id, offer] {
+        handle_remote_reinvite(id, offer);
+    });
+}
+
+std::string CallManager::negotiate_remote_offer(
+    CallId id,
+    const std::string& offer) {
+    std::string answer;
+    services_.invoke_on_core([this, id, offer, &answer] {
+        const auto iterator = calls_.find(id.value);
+        if (iterator == calls_.end()) {
+            return;
+        }
+        auto result = media_.createReinviteAnswer(id, offer);
+        if (!result.ok) {
+            publish_call_event(
+                iterator->second.snapshot,
+                "remote media offer rejected: " + result.error, 488);
+            return;
+        }
+        const auto applied = media_.applyIncomingOffer(id, offer);
+        if (!applied.ok) {
+            publish_call_event(
+                iterator->second.snapshot,
+                "failed to apply remote media offer: " +
+                    applied.error,
+                488);
+            return;
+        }
+        const auto activity = media_.reconcileActivity(id);
+        if (!activity.ok) {
+            publish_call_event(
+                iterator->second.snapshot,
+                "failed to update media activity: " +
+                    activity.error,
+                500);
+            return;
+        }
+        answer = std::move(result.sdp);
+    });
+    return answer;
+}
+
+void CallManager::call_offer_failed(CallId id, int statusCode) {
+    services_.post_callback([this, id, statusCode] {
+        auto iterator = calls_.find(id.value);
+        if (iterator == calls_.end() ||
+            iterator->second.pendingOperation ==
+                PendingOperation::None) {
+            return;
+        }
+        iterator->second.pendingOperation = PendingOperation::None;
+        iterator->second.snapshot.stateText =
+            "media renegotiation failed";
+        publish_call_event(
+            iterator->second.snapshot,
+            "media renegotiation failed", statusCode);
+    });
+}
+
+void CallManager::handle_remote_reinvite(
+    const CallId& id,
+    const std::string& offer) {
+    auto iterator = calls_.find(id.value);
+    if (iterator == calls_.end()) {
+        return;
+    }
+    auto call = iterator->second.adapter;
+    auto answer = offer.empty()
+        ? media_.createReinviteOffer(
+              id, MediaDirection::SendRecv,
+              MediaDirection::SendRecv)
+        : media_.createReinviteAnswer(id, offer);
+    if (!answer.ok) {
+        try {
+            pj::CallOpParam reply(false);
+            reply.statusCode = PJSIP_SC_NOT_ACCEPTABLE_HERE;
+            call->answer(reply);
+        } catch (...) {
+        }
+        publish_call_event(
+            iterator->second.snapshot,
+            "remote re-INVITE rejected: " + answer.error, 488);
+        return;
+    }
+
+    try {
+        pj::CallOpParam param(false);
+        param.statusCode = PJSIP_SC_OK;
+        param.opt.audioCount = media_.audioEnabled() ? 1 : 0;
+        param.opt.videoCount = media_.videoEnabled() ? 1 : 0;
+        param.opt.flag |= PJSUA_CALL_MEDIA_APP_MANAGED;
+        param.sdp.wholeSdp = std::move(answer.sdp);
+        call->answer(param);
+    } catch (const pj::Error& error) {
+        publish_call_event(
+            iterator->second.snapshot,
+            "failed to answer remote re-INVITE: " +
+                std::string(error.info()),
+            500);
+        return;
+    }
+
+    if (!offer.empty()) {
+        const auto applied = media_.applyIncomingOffer(id, offer);
+        if (!applied.ok) {
+            publish_call_event(
+                iterator->second.snapshot,
+                "failed to apply remote re-INVITE media: " +
+                    applied.error,
+                500);
+            return;
+        }
+        const auto activity = media_.reconcileActivity(id);
+        if (!activity.ok) {
+            publish_call_event(
+                iterator->second.snapshot,
+                "failed to update media activity: " +
+                    activity.error,
+                500);
+        }
+    }
+}
+
 void CallManager::adopt_incoming_call(
     std::shared_ptr<sip::PjCall> call,
-    const pj::CallInfo& info) {
+    const pj::CallInfo& info,
+    std::string remoteSdp) {
     if (!call) {
         return;
     }
@@ -197,7 +410,18 @@ void CallManager::adopt_incoming_call(
     snapshot.statusCode = static_cast<int>(info.lastStatusCode);
 
     auto id = snapshot.id;
-    calls_[id.value] = CallRecord{std::move(call), snapshot};
+    std::string answerSdp;
+    const auto local_uri = accounts_.account_uri(snapshot.accountId);
+    auto answer = media_.prepareAnswer(id, local_uri, remoteSdp);
+    if (answer.ok) {
+        answerSdp = std::move(answer.sdp);
+    }
+    const bool remoteMediaApplied = !answerSdp.empty();
+    calls_[id.value] = CallRecord{
+        std::move(call), snapshot, std::move(answerSdp),
+        remoteMediaApplied, PendingOperation::None
+    };
+    call_count_.fetch_add(1, std::memory_order_release);
 
     Event event;
     event.type = EventType::IncomingCall;
@@ -208,6 +432,58 @@ void CallManager::adopt_incoming_call(
     event.reason = snapshot.stateText;
     event.remoteUri = snapshot.remoteUri;
     services_.publish_event(std::move(event));
+}
+
+void CallManager::apply_remote_sdp(const CallId& id,
+                                   const std::string& sdp) {
+    auto iterator = calls_.find(id.value);
+    if (iterator == calls_.end()) {
+        return;
+    }
+    auto result = media_.applyRemoteAnswer(id, sdp);
+    if (!result.ok) {
+        iterator->second.pendingOperation = PendingOperation::None;
+        publish_call_event(
+            iterator->second.snapshot,
+            "remote media negotiation failed: " + result.error, 488);
+        return;
+    }
+    iterator->second.remoteMediaApplied = true;
+    if (iterator->second.pendingOperation ==
+        PendingOperation::Hold) {
+        const auto suspended = media_.suspend(id);
+        iterator->second.pendingOperation = PendingOperation::None;
+        iterator->second.snapshot.state = CallState::LocallyHeld;
+        iterator->second.snapshot.stateText = suspended.ok
+            ? "locally held"
+            : "hold negotiated; media stop failed";
+        publish_call_event(
+            iterator->second.snapshot,
+            iterator->second.snapshot.stateText, 0);
+        return;
+    }
+    if (iterator->second.pendingOperation ==
+        PendingOperation::Resume) {
+        const auto started = media_.start(id);
+        iterator->second.pendingOperation = PendingOperation::None;
+        iterator->second.snapshot.state = CallState::Confirmed;
+        iterator->second.snapshot.stateText = started.ok
+            ? "resumed"
+            : "resume negotiated; media start failed";
+        publish_call_event(
+            iterator->second.snapshot,
+            iterator->second.snapshot.stateText,
+            started.ok ? 0 : 500);
+        return;
+    }
+    if (iterator->second.snapshot.state == CallState::Confirmed) {
+        result = media_.reconcileActivity(id);
+        if (!result.ok) {
+            publish_call_event(
+                iterator->second.snapshot,
+                "failed to start media: " + result.error, 500);
+        }
+    }
 }
 
 void CallManager::update_call(const CallId& id,
@@ -236,7 +512,22 @@ void CallManager::update_call(const CallId& id,
 
     if (state == CallState::Disconnected &&
         iterator != calls_.end()) {
+        media_.stop(id);
         calls_.erase(iterator);
+        {
+            std::lock_guard<std::mutex> lock(call_count_mutex_);
+            call_count_.fetch_sub(1, std::memory_order_release);
+        }
+        call_count_condition_.notify_all();
+    } else if (state == CallState::Confirmed &&
+               iterator != calls_.end()) {
+        if (iterator->second.remoteMediaApplied) {
+            auto result = media_.reconcileActivity(id);
+            if (!result.ok) {
+                publish_call_event(
+                    snapshot, "failed to start media: " + result.error, 500);
+            }
+        }
     }
 }
 

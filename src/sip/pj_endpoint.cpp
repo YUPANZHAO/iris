@@ -25,6 +25,7 @@ void PjEndpoint::initialize(const RuntimeConfig& config) {
         endpoint_config.uaConfig.userAgent =
             std::string("libiris/") + IRIS_VERSION;
         endpoint_config.uaConfig.threadCnt = 1;
+        endpoint_config.medConfig.hasIoqueue = true;
         endpoint_config.medConfig.threadCnt = 1;
         endpoint_config.logConfig.level = config.logLevel;
         endpoint_config.logConfig.consoleLevel = config.logLevel;

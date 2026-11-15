@@ -14,6 +14,13 @@ public:
 
     virtual void call_state_changed(CallId id,
                                     const pj::CallInfo& info) = 0;
+    virtual void remote_sdp_received(CallId id,
+                                     const std::string& sdp) = 0;
+    virtual bool remote_reinvite_received(
+        CallId id, const std::string& offer) = 0;
+    virtual std::string negotiate_remote_offer(
+        CallId id, const std::string& offer) = 0;
+    virtual void call_offer_failed(CallId id, int statusCode) = 0;
 };
 
 class PjCall final : public pj::Call {
@@ -33,6 +40,10 @@ public:
     }
 
     void onCallState(pj::OnCallStateParam& param) override;
+    void onCallTsxState(pj::OnCallTsxStateParam& param) override;
+    void onCallRxOffer(pj::OnCallRxOfferParam& param) override;
+    void onCallRxReinvite(pj::OnCallRxReinviteParam& param) override;
+    void onCallTxOffer(pj::OnCallTxOfferParam& param) override;
 
 private:
     CallCallbackHandler* handler_;

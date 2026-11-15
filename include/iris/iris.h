@@ -2,6 +2,7 @@
 
 #include "iris/config.h"
 #include "iris/events.h"
+#include "iris/media.h"
 #include "iris/runtime.h"
 #include "iris/types.h"
 

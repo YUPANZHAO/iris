@@ -50,7 +50,13 @@ void AccountManager::register_account(const AccountId& id) {
     record.snapshot.state = AccountState::Registering;
     record.snapshot.statusText = "registration in progress";
     record.snapshot.statusCode = 0;
-    record.adapter->setRegistration(true);
+    mark_registration_pending(record);
+    try {
+        record.adapter->setRegistration(true);
+    } catch (...) {
+        clear_registration_pending(record);
+        throw;
+    }
     publish_account_event(
         id, AccountState::Registering, "registration started", 0);
 }
@@ -59,24 +65,35 @@ void AccountManager::unregister_account(const AccountId& id) {
     auto& record = find_account(id);
     record.snapshot.state = AccountState::Unregistering;
     record.snapshot.statusText = "unregistration in progress";
-    record.adapter->setRegistration(false);
+    mark_registration_pending(record);
+    try {
+        record.adapter->setRegistration(false);
+    } catch (...) {
+        clear_registration_pending(record);
+        throw;
+    }
     publish_account_event(
         id, AccountState::Unregistering, "unregistration started", 0);
 }
 
 void AccountManager::remove_account(const AccountId& id) {
-    find_account(id);
+    auto& record = find_account(id);
     auto iterator = accounts_.find(id.value);
     try {
         iterator->second.adapter->setRegistration(false);
     } catch (...) {
     }
+    clear_registration_pending(record);
     accounts_.erase(iterator);
     publish_account_event(id, AccountState::Removed, "account removed", 0);
 }
 
 sip::PjAccount& AccountManager::account(const AccountId& id) {
     return *find_account(id).adapter;
+}
+
+std::string AccountManager::account_uri(const AccountId& id) const {
+    return find_account(id).snapshot.idUri;
 }
 
 std::vector<AccountSnapshot> AccountManager::accounts() const {
@@ -93,16 +110,40 @@ std::vector<AccountSnapshot> AccountManager::accounts() const {
 }
 
 void AccountManager::unregister_all() noexcept {
-    for (const auto& entry : accounts_) {
+    for (auto& entry : accounts_) {
+        const auto& snapshot = entry.second.snapshot;
+        if (snapshot.registrarUri.empty() ||
+            (!snapshot.registered &&
+             snapshot.state != AccountState::Registering &&
+             snapshot.state != AccountState::RegistrationFailed)) {
+            continue;
+        }
+        mark_registration_pending(entry.second);
         try {
             entry.second.adapter->setRegistration(false);
         } catch (...) {
+            clear_registration_pending(entry.second);
         }
     }
 }
 
 void AccountManager::clear() noexcept {
     accounts_.clear();
+    {
+        std::lock_guard<std::mutex> lock(registration_mutex_);
+        pending_registrations_.store(0, std::memory_order_release);
+    }
+    registration_condition_.notify_all();
+}
+
+bool AccountManager::wait_until_registration_settled(
+    std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(registration_mutex_);
+    return registration_condition_.wait_for(
+        lock, timeout, [this] {
+            return pending_registrations_.load(
+                std::memory_order_acquire) == 0;
+        });
 }
 
 void AccountManager::registration_changed(
@@ -122,15 +163,25 @@ void AccountManager::registration_changed(
 }
 
 void AccountManager::incoming_call(sip::PjAccount& account,
-                                   int native_call_id) {
+                                   int native_call_id,
+                                   const std::string& remoteSdp) {
     // PJSUA2 owns this callback thread. The call manager creates the adapter
     // now and schedules all shared-state mutation on the Iris core thread.
     incoming_calls_.accept_incoming_call(
-        account, account.id(), native_call_id);
+        account, account.id(), native_call_id, remoteSdp);
 }
 
 AccountManager::AccountRecord& AccountManager::find_account(
     const AccountId& id) {
+    auto iterator = accounts_.find(id.value);
+    if (iterator == accounts_.end()) {
+        throw std::out_of_range("unknown account: " + id.value);
+    }
+    return iterator->second;
+}
+
+const AccountManager::AccountRecord& AccountManager::find_account(
+    const AccountId& id) const {
     auto iterator = accounts_.find(id.value);
     if (iterator == accounts_.end()) {
         throw std::out_of_range("unknown account: " + id.value);
@@ -165,10 +216,38 @@ void AccountManager::update_registration(
         ? reason
         : info.regStatusText;
     snapshot.registered = info.regIsActive;
+    clear_registration_pending(iterator->second);
 
     auto event_reason = reason.empty() ? snapshot.statusText : reason;
     publish_account_event(
         id, state, event_reason, snapshot.statusCode);
+}
+
+void AccountManager::mark_registration_pending(
+    AccountRecord& record) {
+    if (record.registrationPending) {
+        return;
+    }
+    record.registrationPending = true;
+    {
+        std::lock_guard<std::mutex> lock(registration_mutex_);
+        pending_registrations_.fetch_add(
+            1, std::memory_order_release);
+    }
+}
+
+void AccountManager::clear_registration_pending(
+    AccountRecord& record) {
+    if (!record.registrationPending) {
+        return;
+    }
+    record.registrationPending = false;
+    {
+        std::lock_guard<std::mutex> lock(registration_mutex_);
+        pending_registrations_.fetch_sub(
+            1, std::memory_order_release);
+    }
+    registration_condition_.notify_all();
 }
 
 void AccountManager::publish_account_event(const AccountId& id,

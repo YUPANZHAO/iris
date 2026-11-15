@@ -36,9 +36,14 @@ public:
     void hangupCall(const CallId& id);
     void holdCall(const CallId& id);
     void resumeCall(const CallId& id);
+    void setAudioMuted(const CallId& id, bool muted);
+    void setVideoMuted(const CallId& id, bool muted);
+    void setMediaInput(MediaKind kind, const std::string& source);
+    std::string mediaInput(MediaKind kind) const;
 
     std::vector<AccountSnapshot> accounts() const;
     std::vector<CallSnapshot> calls() const;
+    MediaStats mediaStats(const CallId& id) const;
 
     // Returns events accumulated since the previous call.
     std::vector<Event> pollEvents();

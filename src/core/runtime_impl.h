@@ -19,6 +19,11 @@ class AccountManager;
 class CallManager;
 }
 
+namespace iris::media {
+class MediaEngine;
+class PjIoqueueService;
+}
+
 namespace iris {
 
 class RuntimeImpl final : public core::RuntimeServices,
@@ -44,16 +49,23 @@ public:
     void hangup_call(const CallId& id);
     void hold_call(const CallId& id);
     void resume_call(const CallId& id);
+    void set_audio_muted(const CallId& id, bool muted);
+    void set_video_muted(const CallId& id, bool muted);
+    void set_media_input(MediaKind kind, const std::string& source);
+    std::string media_input(MediaKind kind) const;
 
     std::vector<AccountSnapshot> accounts() const;
     std::vector<CallSnapshot> calls() const;
+    MediaStats media_stats(const CallId& id) const;
     std::vector<Event> poll_events();
 
     void publish_event(Event event) override;
     bool post_callback(std::function<void()> task) override;
+    void invoke_on_core(std::function<void()> task) override;
     void accept_incoming_call(sip::PjAccount& account,
                               const AccountId& account_id,
-                              int native_call_id) override;
+                              int native_call_id,
+                              const std::string& remoteSdp) override;
 
 private:
     void initialize();
@@ -62,7 +74,9 @@ private:
     RuntimeConfig config_;
     mutable core::TaskDispatcher dispatcher_;
     sip::PjEndpoint endpoint_;
+    std::unique_ptr<media::PjIoqueueService> io_service_;
     std::unique_ptr<core::AccountManager> account_manager_;
+    std::unique_ptr<media::MediaEngine> media_engine_;
     std::unique_ptr<core::CallManager> call_manager_;
 
     mutable std::mutex event_mutex_;

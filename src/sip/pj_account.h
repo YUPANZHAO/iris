@@ -21,7 +21,8 @@ public:
         const pj::OnRegStateParam& param) = 0;
 
     virtual void incoming_call(PjAccount& account,
-                               int native_call_id) = 0;
+                               int native_call_id,
+                               const std::string& remoteSdp) = 0;
 };
 
 class PjAccount final : public pj::Account {
