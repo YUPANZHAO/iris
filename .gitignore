@@ -1,0 +1,13 @@
+/build/
+/.vs/
+/.vscode/
+/.cache/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# pjproject is a git submodule. The superproject tracks only .gitmodules and
+# the pinned gitlink; these files are fetched from the submodule remote.
+/third_party/pjproject/*
+
