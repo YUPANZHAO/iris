@@ -36,6 +36,7 @@ public:
     RuntimeImpl& operator=(const RuntimeImpl&) = delete;
 
     std::string pjproject_version() const;
+    unsigned sip_port() const;
 
     AccountId add_account(const AccountConfig& config);
     void register_account(const AccountId& id);
@@ -53,6 +54,7 @@ public:
     void set_video_muted(const CallId& id, bool muted);
     void set_media_input(MediaKind kind, const std::string& source);
     std::string media_input(MediaKind kind) const;
+    void setVideoFrameCallback(VideoFrameCallback callback);
 
     std::vector<AccountSnapshot> accounts() const;
     std::vector<CallSnapshot> calls() const;

@@ -2,7 +2,9 @@
 
 #include "iris/types.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,11 @@ enum class MediaSessionState {
     Stopping,
     Stopped,
     Failed,
+};
+
+enum class VideoFrameKind {
+    Remote,
+    LocalPreview,
 };
 
 enum class AudioSampleFormat {
@@ -153,6 +160,22 @@ struct MediaStats {
     std::uint32_t estimatedSendBitrateKbps = 0;
     std::uint32_t estimatedReceiveBitrateKbps = 0;
 };
+
+struct VideoFrameView {
+    CallId callId;
+    VideoFrameKind kind = VideoFrameKind::Remote;
+    const std::uint8_t* data = nullptr;
+    std::size_t size = 0;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+    std::uint64_t timestampMs = 0;
+};
+
+// Called on a media decode/capture thread. The frame bytes are valid only
+// for the duration of the call; consumers that retain a frame must copy it.
+using VideoFrameCallback =
+    std::function<void(const VideoFrameView& frame)>;
 
 inline const char* to_string(MediaKind kind) noexcept {
     switch (kind) {

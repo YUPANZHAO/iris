@@ -10,6 +10,11 @@ Iris 的媒体平面必须由项目自主控制。PJSUA2 负责 SIP 信令、注
 WebRTC 媒体后端预留稳定边界。接口草案见
 [media-interface-draft.md](media-interface-draft.md)。
 
+Windows 图形客户端使用 Rust-only Native Shell。UI 通过
+`iris_bridge.dll` 的 C ABI 与 libiris 通信，控制面使用低频 JSON
+命令/事件，视频面使用 BGRA frame sink；NSH Direct2D 原生组件在视图树内
+绘制远端和本地画面。详细设计见 [ui-architecture.md](ui-architecture.md)。
+
 ## 两条平面
 
 ```text
@@ -34,6 +39,7 @@ WebRTC 媒体后端预留稳定边界。接口草案见
 
 ```text
 src/api/runtime.cpp          Runtime 公共门面
+src/ffi/c_api.cpp            NSH/C ABI 桥接
 src/core/runtime_impl.*      Core 协调与事件队列
 src/core/task_dispatcher.*   单 Core 线程命令调度
 src/core/account_manager.*   账户表与注册生命周期
@@ -48,6 +54,7 @@ src/media/sdp/codec_registry.* 编码能力、优先级和远端 fmtp 匹配
 src/media/transport/           ioqueue、UDP RTP/RTCP 和基础 RTP 封装
 src/media/backend/ffmpeg/      FFmpeg 采集、编解码和测试媒体源
 src/media/render/              Win32 视频窗口与 WinMM 音频输出
+apps/iris-ui/                  Rust-only Native Shell 图形客户端
 ```
 
 后续媒体阶段计划增加：
@@ -239,6 +246,7 @@ stream 或会议桥 API。
 ## 线程模型
 
 - SIP 和 SDP 控制操作在 Iris Core 线程执行。
+- 请求的 SIP UDP 端口不可用时会自动回退到随机端口。
 - 每路媒体拥有独立采集、编码和解码线程。
 - 生产运行时，媒体 socket 注册到 PJSUA 媒体 endpoint 的共享 ioqueue。
 - 纯媒体测试未初始化 PJSUA 时，使用一个进程内共享的 ioqueue 工作线程。

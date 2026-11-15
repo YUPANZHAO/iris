@@ -28,6 +28,39 @@ std::string session_id(const std::string& value) {
 
 } // namespace
 
+class VideoFrameSinkHub final : public IVideoFrameSink {
+public:
+    void setCallback(VideoFrameCallback callback) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        callback_ = std::move(callback);
+    }
+
+    bool active() const noexcept override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<bool>(callback_);
+    }
+
+    void onVideoFrame(const VideoFrameView& frame) override {
+        VideoFrameCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback = callback_;
+        }
+        if (!callback) {
+            return;
+        }
+        try {
+            callback(frame);
+        } catch (...) {
+            // User callbacks must not terminate a media thread.
+        }
+    }
+
+private:
+    mutable std::mutex mutex_;
+    VideoFrameCallback callback_;
+};
+
 struct MediaEngine::Session final : public IMediaPacketSink {
     Session(CallId value,
             const std::string& localUri,
@@ -167,7 +200,8 @@ MediaEngine::MediaEngine(MediaRuntimeConfig runtime,
                          PjIoqueueService& io_service)
     : runtime_(std::move(runtime)),
       io_service_(io_service),
-      codec_registry_(runtime_.codecPreferences) {
+      codec_registry_(runtime_.codecPreferences),
+      frame_sink_(std::make_shared<VideoFrameSinkHub>()) {
 }
 
 MediaEngine::~MediaEngine() {
@@ -558,7 +592,8 @@ MediaResult MediaEngine::start(const CallId& callId) {
         return MediaResult::failure("remote media is not configured");
     }
     session->backend =
-        std::make_unique<FfmpegMediaBackend>(runtime_);
+        std::make_unique<FfmpegMediaBackend>(
+            runtime_, frame_sink_.get());
     auto result = session->backend->start(session->config, *session);
     if (!result.ok) {
         session->backend.reset();
@@ -662,6 +697,11 @@ std::string MediaEngine::inputSource(MediaKind kind) const {
     return kind == MediaKind::Audio
         ? runtime_.audioInput
         : runtime_.videoInput;
+}
+
+void MediaEngine::setVideoFrameCallback(
+    VideoFrameCallback callback) {
+    frame_sink_->setCallback(std::move(callback));
 }
 
 MediaStats MediaEngine::stats(const CallId& callId) const {

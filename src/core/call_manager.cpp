@@ -5,10 +5,21 @@
 #include "sip/state_mapper.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
 namespace iris::core {
+namespace {
+
+std::uint64_t now_ms() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+
+} // namespace
 
 CallManager::CallManager(RuntimeServices& services,
                          AccountManager& accounts,
@@ -43,6 +54,7 @@ CallId CallManager::start_call(const AccountId& account_id,
     snapshot.remoteUri = destination_uri;
     snapshot.state = CallState::Outgoing;
     snapshot.stateText = "outgoing call initiated";
+    snapshot.createdAtMs = now_ms();
 
     calls_.emplace(call_id.value, CallRecord{
         call, snapshot, offer.sdp, false, PendingOperation::None
@@ -408,6 +420,7 @@ void CallManager::adopt_incoming_call(
     snapshot.state = CallState::Incoming;
     snapshot.stateText = info.stateText;
     snapshot.statusCode = static_cast<int>(info.lastStatusCode);
+    snapshot.createdAtMs = now_ms();
 
     auto id = snapshot.id;
     std::string answerSdp;
@@ -503,6 +516,10 @@ void CallManager::update_call(const CallId& id,
     snapshot.state = state;
     snapshot.stateText = info.stateText;
     snapshot.statusCode = static_cast<int>(info.lastStatusCode);
+    if (state == CallState::Confirmed &&
+        snapshot.connectedAtMs == 0) {
+        snapshot.connectedAtMs = now_ms();
+    }
 
     if (iterator != calls_.end()) {
         iterator->second.snapshot = snapshot;

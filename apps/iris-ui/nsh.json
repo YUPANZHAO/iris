@@ -1,0 +1,21 @@
+{
+  "name": "Iris",
+  "id": "com.yupanzhao.iris",
+  "version": "0.1.0",
+  "build": 1,
+  "rust": ".",
+  "root": "App",
+  "window": {
+    "title": "Iris",
+    "frame": "none",
+    "defaultPosition": "center",
+    "defaultSize": {
+      "width": 1240,
+      "height": 820
+    },
+    "minSize": {
+      "width": 960,
+      "height": 640
+    }
+  }
+}

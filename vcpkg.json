@@ -15,6 +15,7 @@
         "opus"
       ]
     },
+    "nlohmann-json",
     "openssl",
     "opus",
     "openh264"

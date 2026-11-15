@@ -1,10 +1,38 @@
 #include "sip/pj_endpoint.h"
 
 #include <pjsua2.hpp>
+#include <pjsua-lib/pjsua.h>
 
 #include <exception>
 
 namespace iris::sip {
+namespace {
+
+bool udp_port_available(unsigned port) {
+    if (port == 0) {
+        return true;
+    }
+    pj_sock_t socket = PJ_INVALID_SOCKET;
+    if (pj_sock_socket(pj_AF_INET(), pj_SOCK_DGRAM(), 0, &socket) !=
+        PJ_SUCCESS) {
+        return false;
+    }
+    pj_sockaddr address{};
+    const pj_str_t any = pj_str(const_cast<char*>("0.0.0.0"));
+    auto available = false;
+    if (pj_sockaddr_init(
+            pj_AF_INET(), &address, &any,
+            static_cast<pj_uint16_t>(port)) == PJ_SUCCESS) {
+        available =
+            pj_sock_bind(
+                socket, &address, pj_sockaddr_get_len(&address)) ==
+            PJ_SUCCESS;
+    }
+    pj_sock_close(socket);
+    return available;
+}
+
+} // namespace
 
 PjEndpoint::~PjEndpoint() {
     shutdown();
@@ -33,8 +61,29 @@ void PjEndpoint::initialize(const RuntimeConfig& config) {
         endpoint_->libInit(endpoint_config);
 
         pj::TransportConfig transport;
-        transport.port = config.sipPort;
-        endpoint_->transportCreate(PJSIP_TRANSPORT_UDP, transport);
+        transport.port = udp_port_available(config.sipPort)
+            ? config.sipPort
+            : 0;
+        pj::TransportId transport_id = PJSUA_INVALID_ID;
+        try {
+            transport_id =
+                endpoint_->transportCreate(PJSIP_TRANSPORT_UDP, transport);
+        } catch (const pj::Error&) {
+            if (config.sipPort == 0) {
+                throw;
+            }
+            // Let the operating system choose an available loopback-capable
+            // UDP port. This allows several Iris clients on one machine.
+            transport.port = 0;
+            transport_id =
+                endpoint_->transportCreate(PJSIP_TRANSPORT_UDP, transport);
+        }
+        pjsua_transport_info transport_info{};
+        if (pjsua_transport_get_info(
+                transport_id, &transport_info) == PJ_SUCCESS) {
+            sip_port_ = pj_sockaddr_get_port(
+                &transport_info.local_addr);
+        }
 
         endpoint_->libStart();
         endpoint_->libRegisterThread("iris-core");
@@ -69,6 +118,7 @@ void PjEndpoint::shutdown() noexcept {
     }
     endpoint_.reset();
     started_ = false;
+    sip_port_ = 0;
 }
 
 std::string PjEndpoint::version() const {

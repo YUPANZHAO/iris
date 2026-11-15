@@ -21,10 +21,12 @@ public:
     void initialize(const RuntimeConfig& config);
     void shutdown() noexcept;
     std::string version() const;
+    unsigned sip_port() const noexcept { return sip_port_; }
 
 private:
     std::unique_ptr<pj::Endpoint> endpoint_;
     bool started_ = false;
+    unsigned sip_port_ = 0;
 };
 
 } // namespace iris::sip

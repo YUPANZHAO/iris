@@ -86,6 +86,14 @@ public:
     virtual MediaResult sendRtcp(MediaKind kind, ByteView packet) = 0;
 };
 
+class IVideoFrameSink {
+public:
+    virtual ~IVideoFrameSink() = default;
+
+    virtual bool active() const noexcept = 0;
+    virtual void onVideoFrame(const VideoFrameView& frame) = 0;
+};
+
 // The backend owns capture, encoding, packetization, jitter buffering,
 // decoding, rendering, loss recovery and congestion control as one coherent
 // media implementation. A baseline FFmpeg backend and a future WebRTC backend

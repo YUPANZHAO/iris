@@ -2,6 +2,8 @@
 
 #include "core/runtime_impl.h"
 
+#include <utility>
+
 namespace iris {
 
 Runtime::Runtime(const RuntimeConfig& config)
@@ -20,6 +22,10 @@ std::string Runtime::version() const {
 
 std::string Runtime::pjprojectVersion() const {
     return impl_->pjproject_version();
+}
+
+unsigned Runtime::sipPort() const {
+    return impl_->sip_port();
 }
 
 AccountId Runtime::addAccount(const AccountConfig& config) {
@@ -77,6 +83,10 @@ void Runtime::setMediaInput(MediaKind kind, const std::string& source) {
 
 std::string Runtime::mediaInput(MediaKind kind) const {
     return impl_->media_input(kind);
+}
+
+void Runtime::setVideoFrameCallback(VideoFrameCallback callback) {
+    impl_->setVideoFrameCallback(std::move(callback));
 }
 
 std::vector<AccountSnapshot> Runtime::accounts() const {

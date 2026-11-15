@@ -16,6 +16,10 @@ int main() {
         std::cerr << "pjproject version is unavailable\n";
         return 1;
     }
+    if (runtime.sipPort() == 0) {
+        std::cerr << "SIP transport did not report a bound port\n";
+        return 1;
+    }
     if (!runtime.accounts().empty() || !runtime.calls().empty()) {
         std::cerr << "new runtime is not empty\n";
         return 1;

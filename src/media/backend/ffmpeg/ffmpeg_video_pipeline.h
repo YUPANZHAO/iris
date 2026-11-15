@@ -17,7 +17,8 @@ public:
 
     MediaResult start(const MediaRuntimeConfig& runtime,
                       const MediaSessionConfig& session,
-                      IMediaPacketSink& sink);
+                      IMediaPacketSink& sink,
+                      IVideoFrameSink* frameSink = nullptr);
     void stop() noexcept;
     MediaResult onRtpPacket(ByteView packet);
     void setMuted(bool muted);

@@ -8,8 +8,11 @@ extern "C" {
 
 namespace iris::media {
 
-FfmpegMediaBackend::FfmpegMediaBackend(MediaRuntimeConfig runtime)
-    : runtime_(std::move(runtime)) {
+FfmpegMediaBackend::FfmpegMediaBackend(
+    MediaRuntimeConfig runtime,
+    IVideoFrameSink* videoFrameSink)
+    : runtime_(std::move(runtime)),
+      videoFrameSink_(videoFrameSink) {
     static const bool initialized = [] {
         avdevice_register_all();
         return true;
@@ -36,7 +39,8 @@ MediaResult FfmpegMediaBackend::start(
     }
     if (config.videoEnabled) {
         video_ = std::make_unique<FfmpegVideoPipeline>();
-        const auto result = video_->start(runtime_, config, packetSink);
+        const auto result = video_->start(
+            runtime_, config, packetSink, videoFrameSink_);
         if (!result.ok) {
             stop();
             return result;

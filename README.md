@@ -17,6 +17,7 @@ src/media/transport/       PJLIB ioqueue、UDP RTP/RTCP 和基础 RTP 封装
 src/media/backend/ffmpeg/  FFmpeg 采集、编解码和测试媒体源
 src/media/render/          Win32/WinMM 原生音视频渲染
 apps/iris-cli/      命令行测试客户端
+apps/iris-ui/       Windows NSH Rust 图形客户端
 tests/              库、接口编解码和媒体回环测试
 third_party/        固定版本的 Git submodule
 ```
@@ -174,4 +175,34 @@ H.264 的远端格式匹配、本地优先级、Payload Type 与 fmtp 检查集�
 UDP transport 默认使用 PJLIB/PJPROJECT ioqueue：运行时共享 PJSUA 媒体
 endpoint 的 ioqueue；独立媒体测试则创建进程内共享 ioqueue。每个音视频流
 使用独立的 UDP socket 和 RTCP-mux。
+
+## Native Shell 图形客户端
+
+Windows 图形客户端使用 Native Shell 0.5.x 的 Rust-only 模式，不运行
+QuickJS。C++ libiris 通过 `iris_bridge.dll` 的稳定 C ABI 提供给 Rust UI。
+远端视频和本地画中画使用解码帧 sink + NSH Direct2D native component，
+不创建独立顶层视频窗口。
+
+多个客户端可以同时启动：默认尝试 SIP UDP 5060，端口占用时自动改用系统
+随机端口，UI 会把实际端口同步到默认账户 URI。音视频输入通过带勾选状态的
+下拉列表选择，支持自动设备、真实设备和空数据源。
+
+```powershell
+.\scripts\build-ui.ps1
+```
+
+本机环回调用时可指定 SDP 宣告地址：
+
+```powershell
+.\scripts\build-ui.ps1 -MediaAddress 127.0.0.1
+```
+
+打包：
+
+```powershell
+.\scripts\package-ui.ps1
+```
+
+UI 设计、C ABI、线程模型和打包说明见
+[docs/ui-architecture.md](docs/ui-architecture.md)。
 

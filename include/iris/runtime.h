@@ -24,6 +24,7 @@ public:
 
     std::string version() const;
     std::string pjprojectVersion() const;
+    unsigned sipPort() const;
 
     AccountId addAccount(const AccountConfig& config);
     void registerAccount(const AccountId& id);
@@ -40,6 +41,7 @@ public:
     void setVideoMuted(const CallId& id, bool muted);
     void setMediaInput(MediaKind kind, const std::string& source);
     std::string mediaInput(MediaKind kind) const;
+    void setVideoFrameCallback(VideoFrameCallback callback);
 
     std::vector<AccountSnapshot> accounts() const;
     std::vector<CallSnapshot> calls() const;

@@ -28,6 +28,12 @@ std::string RuntimeImpl::pjproject_version() const {
     }).get();
 }
 
+unsigned RuntimeImpl::sip_port() const {
+    return dispatcher_.invoke([this] {
+        return endpoint_.sip_port();
+    }).get();
+}
+
 AccountId RuntimeImpl::add_account(const AccountConfig& config) {
     return dispatcher_.invoke([this, config] {
         return account_manager_->add_account(config);
@@ -125,6 +131,14 @@ std::string RuntimeImpl::media_input(MediaKind kind) const {
     }).get();
 }
 
+void RuntimeImpl::setVideoFrameCallback(
+    VideoFrameCallback callback) {
+    dispatcher_.invoke(
+        [this, callback = std::move(callback)] {
+            media_engine_->setVideoFrameCallback(callback);
+        }).get();
+}
+
 std::vector<AccountSnapshot> RuntimeImpl::accounts() const {
     return dispatcher_.invoke([this] {
         return account_manager_->accounts();
@@ -152,6 +166,12 @@ std::vector<Event> RuntimeImpl::poll_events() {
 
 void RuntimeImpl::publish_event(Event event) {
     event.sequence = ++next_event_id_;
+    if (event.timestampMs == 0) {
+        event.timestampMs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+    }
     std::lock_guard<std::mutex> lock(event_mutex_);
     events_.push_back(std::move(event));
 }

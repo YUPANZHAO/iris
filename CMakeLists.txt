@@ -10,6 +10,7 @@ project(
 option(IRIS_BUILD_CLI "Build the iris command line client" ON)
 option(IRIS_BUILD_TESTS "Build iris tests" ON)
 option(IRIS_WITH_MEDIA "Build the independent FFmpeg media plane" ON)
+option(IRIS_BUILD_UI_BRIDGE "Build the NSH C ABI bridge" ON)
 
 # pjproject has first-class CMake targets in the pinned fork. Keep its sample
 # applications and tests out of the application build.
@@ -37,6 +38,9 @@ endif()
 if(IRIS_WITH_MEDIA)
   find_package(FFMPEG REQUIRED)
   find_package(OpenSSL REQUIRED)
+endif()
+if(IRIS_BUILD_UI_BRIDGE)
+  find_package(nlohmann_json CONFIG REQUIRED)
 endif()
 
 add_library(iris STATIC
@@ -132,6 +136,24 @@ if(WIN32 AND IRIS_WITH_MEDIA)
   endfunction()
 endif()
 
+if(IRIS_BUILD_UI_BRIDGE)
+  add_library(iris_bridge SHARED src/ffi/c_api.cpp)
+  add_library(iris::bridge ALIAS iris_bridge)
+  target_compile_features(iris_bridge PRIVATE cxx_std_17)
+  target_compile_definitions(iris_bridge PRIVATE IRIS_BRIDGE_BUILD=1)
+  target_include_directories(iris_bridge PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(iris_bridge PRIVATE
+    iris::iris
+    nlohmann_json::nlohmann_json
+  )
+  if(WIN32 AND IRIS_WITH_MEDIA)
+    iris_copy_vcpkg_runtime(iris_bridge)
+  endif()
+endif()
+
 if(IRIS_BUILD_CLI)
   add_executable(iris-cli apps/iris-cli/main.cpp)
   target_compile_features(iris-cli PRIVATE cxx_std_17)
@@ -153,6 +175,19 @@ if(IRIS_BUILD_TESTS)
     iris_copy_vcpkg_runtime(iris-runtime-smoke)
   endif()
   add_test(NAME iris-runtime-smoke COMMAND iris-runtime-smoke)
+
+  if(IRIS_BUILD_UI_BRIDGE)
+    add_executable(iris-c-api-test tests/c_api_test.cpp)
+    target_compile_features(iris-c-api-test PRIVATE cxx_std_17)
+    target_include_directories(iris-c-api-test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(iris-c-api-test PRIVATE iris::bridge)
+    if(WIN32 AND IRIS_WITH_MEDIA)
+      iris_copy_vcpkg_runtime(iris-c-api-test)
+    endif()
+    add_test(NAME iris-c-api-test COMMAND iris-c-api-test)
+  endif()
 
   add_executable(iris-media-interface-compile
     tests/media_interface_compile.cpp

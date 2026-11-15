@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ostream>
+#include <cstdint>
 #include <string>
 
 namespace iris {
@@ -107,6 +108,8 @@ struct CallSnapshot {
     std::string stateText;
     CallState state = CallState::Outgoing;
     int statusCode = 0;
+    std::uint64_t createdAtMs = 0;
+    std::uint64_t connectedAtMs = 0;
 };
 
 } // namespace iris

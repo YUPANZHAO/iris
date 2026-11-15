@@ -14,6 +14,7 @@
 namespace iris::media {
 
 class PjIoqueueService;
+class VideoFrameSinkHub;
 
 class MediaEngine {
 public:
@@ -50,6 +51,7 @@ public:
     MediaResult setVideoMuted(const CallId& callId, bool muted);
     void setInputSource(MediaKind kind, const std::string& source);
     std::string inputSource(MediaKind kind) const;
+    void setVideoFrameCallback(VideoFrameCallback callback);
     MediaStats stats(const CallId& callId) const;
     bool audioEnabled() const noexcept { return runtime_.audioEnabled; }
     bool videoEnabled() const noexcept { return runtime_.videoEnabled; }
@@ -62,6 +64,7 @@ private:
     MediaRuntimeConfig runtime_;
     PjIoqueueService& io_service_;
     CodecRegistry codec_registry_;
+    std::shared_ptr<VideoFrameSinkHub> frame_sink_;
     std::unordered_map<std::string, std::unique_ptr<Session>> sessions_;
 };
 

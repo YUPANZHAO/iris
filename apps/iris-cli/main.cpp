@@ -204,6 +204,7 @@ int repl(const iris::RuntimeConfig& config) {
     iris::Runtime runtime(config);
     std::cout << "Iris CLI " << runtime.version()
               << " (pjproject " << runtime.pjprojectVersion() << ")\n"
+              << "SIP UDP port: " << runtime.sipPort() << "\n"
               << "media audio=" << (config.media.audioEnabled ? "on" : "off")
               << " video=" << (config.media.videoEnabled ? "on" : "off")
               << " source=" << config.media.audioInput << " / "

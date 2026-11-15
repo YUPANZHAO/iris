@@ -11,7 +11,9 @@ namespace iris::media {
 
 class FfmpegMediaBackend final : public IMediaBackend {
 public:
-    explicit FfmpegMediaBackend(MediaRuntimeConfig runtime);
+    explicit FfmpegMediaBackend(
+        MediaRuntimeConfig runtime,
+        IVideoFrameSink* videoFrameSink = nullptr);
     ~FfmpegMediaBackend() override;
 
     MediaResult start(const MediaSessionConfig& config,
@@ -30,6 +32,7 @@ public:
 
 private:
     MediaRuntimeConfig runtime_;
+    IVideoFrameSink* videoFrameSink_ = nullptr;
     std::unique_ptr<FfmpegAudioPipeline> audio_;
     std::unique_ptr<FfmpegVideoPipeline> video_;
     bool running_ = false;

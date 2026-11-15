@@ -33,6 +33,13 @@ namespace {
 constexpr std::uint8_t kDefaultH264PayloadType = 96;
 constexpr std::size_t kRtpPayloadMtu = 1200;
 
+std::uint64_t now_ms() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
 bool equals_h264(const std::string& value) {
     return value.size() == 4 &&
         std::tolower(static_cast<unsigned char>(value[0])) == 'h' &&
@@ -119,9 +126,12 @@ struct FfmpegVideoPipeline::Impl {
 
     MediaResult start(const MediaRuntimeConfig& runtime,
                       const MediaSessionConfig& session,
-                      IMediaPacketSink& sink) {
+                      IMediaPacketSink& sink,
+                      IVideoFrameSink* frameSink) {
         stop();
         sink_ = &sink;
+        frame_sink = frameSink;
+        call_id = session.callId;
         width = std::max(160, runtime.videoWidth);
         height = std::max(90, runtime.videoHeight);
         fps = std::max(1, runtime.videoFps);
@@ -293,6 +303,8 @@ struct FfmpegVideoPipeline::Impl {
         capture_sws = nullptr;
         sws_freeContext(render_sws);
         render_sws = nullptr;
+        sws_freeContext(preview_sws);
+        preview_sws = nullptr;
         avcodec_free_context(&capture_decoder);
         avcodec_free_context(&encoder_context);
         avcodec_free_context(&receive_decoder);
@@ -439,6 +451,7 @@ struct FfmpegVideoPipeline::Impl {
         if (!ensure_capture_sws(source_frame)) {
             return;
         }
+        emit_local_preview(source_frame);
         AVFrame* frame = av_frame_alloc();
         frame->format = AV_PIX_FMT_YUV420P;
         frame->width = width;
@@ -472,6 +485,46 @@ struct FfmpegVideoPipeline::Impl {
             av_packet_free(&encoded);
         }
         av_frame_free(&frame);
+    }
+
+    void emit_local_preview(AVFrame* source_frame) {
+        if (!frame_sink || !frame_sink->active()) {
+            return;
+        }
+        preview_sws = sws_getCachedContext(
+            preview_sws,
+            source_frame->width, source_frame->height,
+            static_cast<AVPixelFormat>(source_frame->format),
+            source_frame->width, source_frame->height,
+            AV_PIX_FMT_BGRA, SWS_BILINEAR,
+            nullptr, nullptr, nullptr);
+        if (!preview_sws) {
+            return;
+        }
+        const auto byte_count = av_image_get_buffer_size(
+            AV_PIX_FMT_BGRA, source_frame->width,
+            source_frame->height, 1);
+        if (byte_count <= 0) {
+            return;
+        }
+        std::vector<std::uint8_t> bgra(
+            static_cast<std::size_t>(byte_count));
+        std::uint8_t* destination[] = {bgra.data()};
+        const int lines[] = {source_frame->width * 4};
+        sws_scale(
+            preview_sws, source_frame->data,
+            source_frame->linesize, 0, source_frame->height,
+            destination, lines);
+        frame_sink->onVideoFrame(VideoFrameView{
+            call_id,
+            VideoFrameKind::LocalPreview,
+            bgra.data(),
+            bgra.size(),
+            source_frame->width,
+            source_frame->height,
+            source_frame->width * 4,
+            now_ms(),
+        });
     }
 
     void send_h264(const std::uint8_t* data,
@@ -835,7 +888,8 @@ struct FfmpegVideoPipeline::Impl {
 
     void render_frame(AVFrame* frame) {
         frames_decoded.fetch_add(1);
-        if (!renderer) {
+        if (!renderer &&
+            !(frame_sink && frame_sink->active())) {
             return;
         }
         render_sws = sws_getCachedContext(
@@ -856,8 +910,22 @@ struct FfmpegVideoPipeline::Impl {
         sws_scale(
             render_sws, frame->data, frame->linesize,
             0, frame->height, destination, lines);
-        renderer->display(
-            std::move(bgra), frame->width, frame->height);
+        if (frame_sink && frame_sink->active()) {
+            frame_sink->onVideoFrame(VideoFrameView{
+                call_id,
+                VideoFrameKind::Remote,
+                bgra.data(),
+                bgra.size(),
+                frame->width,
+                frame->height,
+                frame->width * 4,
+                now_ms(),
+            });
+        }
+        if (renderer) {
+            renderer->display(
+                std::move(bgra), frame->width, frame->height);
+        }
     }
 
     CaptureSourceSpec source;
@@ -868,7 +936,10 @@ struct FfmpegVideoPipeline::Impl {
     AVCodecContext* receive_decoder = nullptr;
     SwsContext* capture_sws = nullptr;
     SwsContext* render_sws = nullptr;
+    SwsContext* preview_sws = nullptr;
     IMediaPacketSink* sink_ = nullptr;
+    IVideoFrameSink* frame_sink = nullptr;
+    CallId call_id;
     RtpSender rtp;
     std::uint8_t payload_type = kDefaultH264PayloadType;
     std::unique_ptr<NativeVideoRenderer> renderer;
@@ -910,8 +981,9 @@ FfmpegVideoPipeline::~FfmpegVideoPipeline() {
 MediaResult FfmpegVideoPipeline::start(
     const MediaRuntimeConfig& runtime,
     const MediaSessionConfig& session,
-    IMediaPacketSink& sink) {
-    return impl_->start(runtime, session, sink);
+    IMediaPacketSink& sink,
+    IVideoFrameSink* frameSink) {
+    return impl_->start(runtime, session, sink, frameSink);
 }
 
 void FfmpegVideoPipeline::stop() noexcept {

@@ -21,6 +21,7 @@ struct Event {
     CallId callId;
     AccountState accountState = AccountState::Created;
     CallState callState = CallState::Outgoing;
+    std::uint64_t timestampMs = 0;
     int statusCode = 0;
     std::string reason;
     std::string remoteUri;
