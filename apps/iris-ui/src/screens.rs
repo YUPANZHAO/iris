@@ -14,12 +14,111 @@ const PANEL_ALT: u32 = 0x182437;
 const BORDER: u32 = 0x26364d;
 const TEXT: u32 = 0xe8eef8;
 const MUTED: u32 = 0x91a0b5;
-const ACCENT: u32 = 0x3b82f6;
+const ACCENT: u32 = 0x315fc5;
 const DANGER: u32 = 0xdc3d4b;
 const SUCCESS: u32 = 0x2fbf81;
 
-fn button(label: &'static str, background: u32) -> View {
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Dashboard,
+    Dialer,
+    Settings,
+}
+
+macro_rules! icon {
+    ($name:literal) => {
+        nsh_core::element::svg(nsh_core::element::ImageSrc::svg_markup(include_str!(
+            concat!("../assets/icons/", $name, ".svg")
+        )))
+        .w(px(18.0))
+        .h(px(18.0))
+        .flex_shrink(0.0)
+        .pointer_events(PointerEvents::None)
+    };
+}
+
+fn button(icon: impl IntoElement, label: &'static str, background: u32) -> View {
+    reactive_button(icon, move || label, background)
+}
+
+fn navigation(page: Signal<Page>) -> View {
     view()
+        .w(px(188.0))
+        .h_full()
+        .p(px(14.0))
+        .gap(px(8.0))
+        .bg(rgb(PANEL))
+        .border_r_1()
+        .border_r_color(rgb(BORDER))
+        .child(nav_item(
+            page,
+            Page::Dashboard,
+            icon!("layout-dashboard"),
+            "Dashboard",
+        ))
+        .child(nav_item(page, Page::Dialer, icon!("grid-3x3"), "Dialer"))
+        .child(nav_item(
+            page,
+            Page::Settings,
+            icon!("settings"),
+            "Settings",
+        ))
+}
+
+fn heading(label: &'static str) -> impl IntoElement {
+    text(label)
+        .text_size(px(30.0))
+        .font_weight(FontWeight::BOLD)
+}
+
+fn section(label: &'static str) -> impl IntoElement {
+    text(label)
+        .text_size(px(16.0))
+        .font_weight(FontWeight::SEMIBOLD)
+}
+
+fn card() -> View {
+    view()
+        .p(px(20.0))
+        .gap(px(10.0))
+        .rounded(px(14.0))
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(BORDER))
+}
+
+fn stat(icon: impl IntoElement, label: &'static str, value: impl Fn() -> String + 'static) -> View {
+    card().flex_1().child(icon).child(field_label(label)).child(
+        text(value)
+            .text_size(px(17.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .number_of_lines(1),
+    )
+}
+
+fn nav_item(
+    page: Signal<Page>,
+    target: Page,
+    symbol: impl IntoElement,
+    label: &'static str,
+) -> View {
+    button(symbol, label, PANEL)
+        .bg(move || rgb(if page.get() == target { ACCENT } else { PANEL }))
+        .justify_start()
+        .on_press(move || page.set(target))
+}
+
+fn reactive_button(
+    icon: impl IntoElement,
+    label: impl Fn() -> &'static str + 'static,
+    background: u32,
+) -> View {
+    press_target()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .child(icon)
         .px(px(15.0))
         .py(px(10.0))
         .rounded(px(10.0))
@@ -33,22 +132,11 @@ fn button(label: &'static str, background: u32) -> View {
         )
 }
 
-fn reactive_button(
-    label: impl Fn() -> &'static str + 'static,
-    background: u32,
-) -> View {
+fn press_target() -> View {
     view()
-        .px(px(15.0))
-        .py(px(10.0))
-        .rounded(px(10.0))
-        .bg(rgb(background))
-        .active(|style| style.opacity(0.7))
-        .child(
-            text(label)
-                .text_size(px(14.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xffffff)),
-        )
+        .role(nsh_core::AccessibilityRole::Button)
+        .focusable(true)
+        .focus_visible(|style| style.border_1().border_color(rgb(0x86b7ff)))
 }
 
 fn field_label(value: &'static str) -> impl IntoElement {
@@ -83,7 +171,10 @@ fn status_text(state: &UiState) -> &'static str {
         "Error"
     } else if !state.ready {
         "Starting"
-    } else if state.first_account().is_some_and(|account| account.registered) {
+    } else if state
+        .first_account()
+        .is_some_and(|account| account.registered)
+    {
         "Registered"
     } else {
         "Ready"
@@ -95,7 +186,10 @@ fn status_color(state: &UiState) -> u32 {
         DANGER
     } else if !state.ready {
         0xd08a24
-    } else if state.first_account().is_some_and(|account| account.registered) {
+    } else if state
+        .first_account()
+        .is_some_and(|account| account.registered)
+    {
         SUCCESS
     } else {
         ACCENT
@@ -105,13 +199,6 @@ fn status_color(state: &UiState) -> u32 {
 pub fn app() -> impl IntoElement {
     let client = IrisClient::start();
     let state = signal(client.state());
-    {
-        let client = client.clone();
-        set_interval(Duration::from_millis(100), move || {
-            state.set(client.state());
-        });
-    }
-
     let account_uri = signal("sip:alice@127.0.0.1:5060".to_owned());
     let account_uri_edited = signal(false);
     let sip_port_synced = signal(false);
@@ -119,27 +206,35 @@ pub fn app() -> impl IntoElement {
     let username = signal(String::new());
     let password = signal(String::new());
     let destination = signal(String::new());
+    let page = signal(Page::Dashboard);
+    let show_preview = signal(false);
+    let call_id = signal(String::new());
     let microphone_muted = signal(false);
     let camera_muted = signal(false);
     let audio_menu_open = signal(false);
     let video_menu_open = signal(false);
 
     {
-        let state = state.clone();
-        let account_uri = account_uri.clone();
+        let client = client.clone();
         set_interval(Duration::from_millis(100), move || {
-            let snapshot = state.get().snapshot;
-            if !sip_port_synced.get_untracked() &&
-                snapshot.sip_port != 0
-            {
+            let current = client.state();
+            let id = current
+                .active_call()
+                .map(|call| call.id.as_str())
+                .unwrap_or_default();
+            if call_id.get_untracked() != id {
+                microphone_muted.set(false);
+                camera_muted.set(false);
+                call_id.set(id.to_owned());
+            }
+            let sip_port = current.snapshot.sip_port;
+            if !sip_port_synced.get_untracked() && sip_port != 0 {
                 if !account_uri_edited.get_untracked() {
-                    account_uri.set(format!(
-                        "sip:alice@127.0.0.1:{}",
-                        snapshot.sip_port
-                    ));
+                    account_uri.set(format!("sip:alice@127.0.0.1:{sip_port}"));
                 }
                 sip_port_synced.set(true);
             }
+            state.set(current);
         });
     }
 
@@ -176,7 +271,9 @@ pub fn app() -> impl IntoElement {
             if let Some(account) = state.get().first_account() {
                 let target = destination.get();
                 if !target.trim().is_empty() {
-                    client.start_call(&account.id, target.trim());
+                    let target = target.trim();
+                    let uri = dial_uri(target, &account.id_uri);
+                    client.start_call(&account.id, &uri);
                 }
             }
         }
@@ -229,17 +326,17 @@ pub fn app() -> impl IntoElement {
                         )
                 })
                 .child(window_control_button(
-                    "−",
+                    icon!("minus"),
                     "Minimize",
                     WindowControl::Minimize,
                 ))
                 .child(window_control_button(
-                    "□",
+                    icon!("maximize"),
                     "Maximize or restore",
                     WindowControl::Maximize,
                 ))
                 .child(window_control_button(
-                    "×",
+                    icon!("x"),
                     "Close",
                     WindowControl::Close,
                 )),
@@ -248,28 +345,60 @@ pub fn app() -> impl IntoElement {
             view()
                 .flex_1()
                 .flex_row()
-                .child(sidebar(
-                    client.clone(),
-                    state.clone(),
-                    account_uri,
-                    account_uri_edited,
-                    registrar_uri,
-                    username,
-                    password,
-                    destination.clone(),
-                    add_account,
-                    register_account,
-                    start_call,
-                    audio_menu_open,
-                    video_menu_open,
+                .child(when(
+                    move || call_id.get().is_empty(),
+                    move || navigation(page),
                 ))
-                .child(call_area(
-                    client,
-                    state.clone(),
-                    destination,
-                    microphone_muted,
-                    camera_muted,
-                )),
+                .child(
+                    view().flex_1().min_w(px(0.0)).child(
+                        when(move || !call_id.get().is_empty(), {
+                            let client = client.clone();
+                            move || {
+                                call_area(
+                                    client.clone(),
+                                    state,
+                                    call_id,
+                                    microphone_muted,
+                                    camera_muted,
+                                    show_preview,
+                                )
+                            }
+                        })
+                        .otherwise(move || {
+                            view()
+                                .flex_1()
+                                .child(when(
+                                    move || page.get() == Page::Dashboard,
+                                    move || dashboard(state, page),
+                                ))
+                                .child(when(move || page.get() == Page::Dialer, {
+                                    let start_call = start_call.clone();
+                                    move || dialer(state, page, destination, start_call.clone())
+                                }))
+                                .child(when(move || page.get() == Page::Settings, {
+                                    let client = client.clone();
+                                    let add_account = add_account.clone();
+                                    let register_account = register_account.clone();
+                                    move || {
+                                        settings(
+                                            client.clone(),
+                                            state,
+                                            account_uri,
+                                            account_uri_edited,
+                                            registrar_uri,
+                                            username,
+                                            password,
+                                            add_account.clone(),
+                                            register_account.clone(),
+                                            audio_menu_open,
+                                            video_menu_open,
+                                            show_preview,
+                                        )
+                                    }
+                                }))
+                        }),
+                    ),
+                ),
         )
         .child(
             view()
@@ -289,8 +418,7 @@ pub fn app() -> impl IntoElement {
                             } else {
                                 format!(
                                     "Iris {} | PJPROJECT {}",
-                                    state.snapshot.version,
-                                    state.snapshot.pjproject_version
+                                    state.snapshot.version, state.snapshot.pjproject_version
                                 )
                             }
                         }
@@ -308,7 +436,7 @@ pub fn app() -> impl IntoElement {
 }
 
 fn window_control_button(
-    glyph: &'static str,
+    glyph: impl IntoElement,
     label: &'static str,
     control: WindowControl,
 ) -> impl IntoElement {
@@ -320,11 +448,7 @@ fn window_control_button(
         .window_drag(false)
         .window_control(control)
         .label(label)
-        .child(
-            text(glyph)
-                .text_size(px(18.0))
-                .text_color(rgb(0xd0d8e5)),
-        )
+        .child(glyph)
 }
 
 /// Native text editing with a DirectWrite fallback for NSH 0.5.1.
@@ -409,8 +533,235 @@ fn text_input_field(
         }))
 }
 
+fn page_content(title: &'static str) -> nsh_core::element::Scroll {
+    scroll()
+        .flex_1()
+        .p(px(28.0))
+        .gap(px(18.0))
+        .child(heading(title))
+}
+
+fn dashboard(state: Signal<UiState>, page: Signal<Page>) -> impl IntoElement {
+    page_content("Dashboard")
+        .child(
+            view()
+                .flex_row()
+                .gap(px(12.0))
+                .child(stat(icon!("radio"), "SIP listener", move || {
+                    match state.get().snapshot.sip_port {
+                        0 => "Unavailable".to_owned(),
+                        port => format!("UDP · {port}"),
+                    }
+                }))
+                .child(stat(icon!("users"), "Registered accounts", move || {
+                    let accounts = state.get().snapshot.accounts;
+                    format!(
+                        "{} / {}",
+                        accounts.iter().filter(|account| account.registered).count(),
+                        accounts.len()
+                    )
+                }))
+                .child(stat(icon!("activity"), "Active calls", move || {
+                    state
+                        .get()
+                        .snapshot
+                        .calls
+                        .iter()
+                        .filter(|call| call.is_active())
+                        .count()
+                        .to_string()
+                })),
+        )
+        .child(
+            card()
+                .child(section("SIP accounts"))
+                .child(dynamic(move || {
+                    let accounts = state.get().snapshot.accounts;
+                    if accounts.is_empty() {
+                        return vec![
+                            view().child(text("No accounts configured").text_color(rgb(MUTED))),
+                        ];
+                    }
+                    accounts
+                        .into_iter()
+                        .map(|account| {
+                            view()
+                                .flex_row()
+                                .gap(px(12.0))
+                                .child(text(account.id_uri).flex_1().number_of_lines(1))
+                                .child(text(account.state).text_color(rgb(if account.registered {
+                                    SUCCESS
+                                } else {
+                                    MUTED
+                                })))
+                        })
+                        .collect()
+                }))
+                .child(
+                    view()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .child(
+                            button(icon!("settings"), "Configure", PANEL_ALT)
+                                .on_press(move || page.set(Page::Settings)),
+                        )
+                        .child(
+                            button(icon!("phone"), "Open dialer", ACCENT)
+                                .on_press(move || page.set(Page::Dialer)),
+                        ),
+                ),
+        )
+        .child(
+            card()
+                .child(section("Recent calls"))
+                .child(dynamic(move || {
+                    let calls: Vec<_> = state
+                        .get()
+                        .events
+                        .into_iter()
+                        .rev()
+                        .filter(|event| {
+                            event.call_state == "disconnected" && !event.remote_uri.is_empty()
+                        })
+                        .take(5)
+                        .collect();
+                    if calls.is_empty() {
+                        return vec![view().child(text("No calls yet").text_color(rgb(MUTED)))];
+                    }
+                    calls
+                        .into_iter()
+                        .take(5)
+                        .map(|call| {
+                            view()
+                                .flex_row()
+                                .gap(px(12.0))
+                                .child(text(call.remote_uri).flex_1().number_of_lines(1))
+                                .child(text(call.reason).text_color(rgb(MUTED)))
+                        })
+                        .collect()
+                })),
+        )
+}
+
+fn dial_uri(target: &str, account_uri: &str) -> String {
+    if target.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("sip")
+            || scheme.eq_ignore_ascii_case("sips")
+            || scheme.eq_ignore_ascii_case("tel")
+    }) {
+        return target.to_owned();
+    }
+    let (scheme, account) = account_uri.split_once(':').unwrap_or(("sip", account_uri));
+    if target.contains('@') {
+        return format!("{scheme}:{target}");
+    }
+    let target = target.replace('#', "%23");
+    match account.rsplit_once('@') {
+        Some((_, domain)) => format!("{scheme}:{target}@{domain}"),
+        None => format!("{scheme}:{target}"),
+    }
+}
+
+fn dialer(
+    state: Signal<UiState>,
+    page: Signal<Page>,
+    destination: Signal<String>,
+    start_call: impl Fn() + Clone + 'static,
+) -> impl IntoElement {
+    let digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
+    page_content("Dialer").child(
+        card()
+            .w(px(420.0))
+            .child(
+                text(move || {
+                    state
+                        .get()
+                        .first_account()
+                        .map(|account| format!("From {}", account.id_uri))
+                        .unwrap_or_else(|| "Add a SIP account to place calls".to_owned())
+                })
+                .text_color(rgb(MUTED)),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .gap(px(8.0))
+                    .child(view().flex_1().child(text_input_field(
+                        destination,
+                        "Number or SIP address",
+                        false,
+                        move |value| destination.set(value.to_owned()),
+                    )))
+                    .child(
+                        button(icon!("delete"), "Delete", PANEL_ALT).on_press(move || {
+                            destination.update(|value| {
+                                value.pop();
+                            })
+                        }),
+                    ),
+            )
+            .children(
+                digits
+                    .chunks_exact(3)
+                    .map(|row| {
+                        view().flex_row().gap(px(8.0)).children(
+                            row.iter()
+                                .copied()
+                                .map(|digit| {
+                                    press_target()
+                                        .flex_1()
+                                        .h(px(47.0))
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(8.0))
+                                        .bg(rgb(PANEL_ALT))
+                                        .active(|style| style.opacity(0.7))
+                                        .on_press(move || {
+                                            destination.update(|value| value.push_str(digit))
+                                        })
+                                        .child(text(digit).text_size(px(20.0)))
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .child(
+                when(
+                    move || state.get().first_account().is_none(),
+                    move || {
+                        button(icon!("settings"), "Configure account", PANEL_ALT)
+                            .on_press(move || page.set(Page::Settings))
+                    },
+                )
+                .otherwise(move || {
+                    button(icon!("phone"), "Start call", SUCCESS)
+                        .disabled(move || {
+                            destination.get().trim().is_empty() || state.get().pending
+                        })
+                        .on_press(start_call.clone())
+                }),
+            ),
+    )
+}
+
+fn preview_button(show_preview: Signal<bool>) -> View {
+    reactive_button(
+        icon!("eye"),
+        move || {
+            if show_preview.get() {
+                "Hide self-view"
+            } else {
+                "Show self-view"
+            }
+        },
+        PANEL_ALT,
+    )
+    .on_press(move || show_preview.update(|visible| *visible = !*visible))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn sidebar(
+fn settings(
     client: Arc<IrisClient>,
     state: Signal<UiState>,
     account_uri: Signal<String>,
@@ -418,24 +769,15 @@ fn sidebar(
     registrar_uri: Signal<String>,
     username: Signal<String>,
     password: Signal<String>,
-    destination: Signal<String>,
     add_account: impl Fn() + 'static,
     register_account: impl Fn() + 'static,
-    start_call: impl Fn() + 'static,
     audio_menu_open: Signal<bool>,
     video_menu_open: Signal<bool>,
+    show_preview: Signal<bool>,
 ) -> impl IntoElement {
-    scroll()
-        .w(px(360.0))
-        .h_full()
-        .p(px(18.0))
-        .gap(px(16.0))
-        .border_r_1()
-        .border_r_color(rgb(BORDER))
-        .bg(rgb(PANEL))
+    page_content("Settings")
         .child(
-            view()
-                .gap(px(10.0))
+            card()
                 .child(
                     text("SIP account")
                         .text_size(px(16.0))
@@ -491,13 +833,15 @@ fn sidebar(
                     view()
                         .flex_row()
                         .gap(px(8.0))
-                        .child(button("Add account", ACCENT).on_press(add_account))
-                        .child(button("Register", PANEL_ALT).on_press(register_account)),
+                        .child(button(icon!("users"), "Add account", ACCENT).on_press(add_account))
+                        .child(
+                            button(icon!("radio"), "Register", PANEL_ALT)
+                                .on_press(register_account),
+                        ),
                 ),
         )
         .child(
-            view()
-                .gap(px(8.0))
+            card()
                 .child(
                     text("Accounts")
                         .text_size(px(14.0))
@@ -533,26 +877,7 @@ fn sidebar(
                 })),
         )
         .child(
-            view()
-                .gap(px(8.0))
-                .child(
-                    text("Quick call")
-                        .text_size(px(14.0))
-                        .font_weight(FontWeight::BOLD),
-                )
-                .child(
-                    text_input_field(
-                        destination.clone(),
-                        "sip:bob@example.com",
-                        false,
-                        move |value: &str| destination.set(value.to_owned()),
-                    ),
-                )
-                .child(button("Start call", ACCENT).on_press(start_call)),
-        )
-        .child(
-            view()
-                .gap(px(8.0))
+            card()
                 .child(
                     text("Media source")
                         .text_size(px(14.0))
@@ -573,48 +898,21 @@ fn sidebar(
                     video_menu_open,
                 )),
         )
-        .child(view().flex_1())
         .child(
-            view()
-                .p(px(12.0))
-                .rounded(px(10.0))
-                .bg(rgb(0x102236))
-                .gap(px(3.0))
-                .child(
-                    text("Media path")
-                        .text_size(px(12.0))
-                        .text_color(rgb(MUTED)),
-                )
-                .child(
-                    text("FFmpeg capture | Iris RTP | Direct2D")
-                        .text_size(px(12.0))
-                        .text_color(rgb(0x86b7ff)),
-                ),
+            card()
+                .items_start()
+                .child(section("Video during calls"))
+                .child(preview_button(show_preview)),
         )
 }
-
 fn call_area(
     client: Arc<IrisClient>,
     state: Signal<UiState>,
-    destination: Signal<String>,
+    call_id: Signal<String>,
     microphone_muted: Signal<bool>,
     camera_muted: Signal<bool>,
+    show_preview: Signal<bool>,
 ) -> impl IntoElement {
-    let call_id = signal(String::new());
-    {
-        let state = state.clone();
-        set_interval(Duration::from_millis(100), move || {
-            let id = state
-                .get()
-                .active_call()
-                .map(|call| call.id.clone())
-                .unwrap_or_default();
-            if call_id.get_untracked() != id {
-                call_id.set(id);
-            }
-        });
-    }
-
     let answer: Arc<dyn Fn() + Send + Sync> = {
         let client = client.clone();
         let state = state.clone();
@@ -692,47 +990,17 @@ fn call_area(
                 .border_1()
                 .border_color(rgb(BORDER))
                 .child(
-                    when(
-                        {
-                            let call_id = call_id.clone();
-                            move || !call_id.get().is_empty()
-                        },
-                        {
-                            let call_id = call_id.clone();
-                            move || {
-                                native("iris.remote-video")
-                                    .prop("callId", {
-                                        let call_id = call_id.clone();
-                                        move || json!(call_id.get())
-                                    })
-                                    .flex_1()
-                            }
-                        },
-                    )
-                    .otherwise(move || {
-                        view()
-                            .flex_1()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(10.0))
-                            .child(
-                                text("SIP video conference")
-                                    .text_size(px(30.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xffffff)),
-                            )
-                            .child(
-                                text("Choose an account and start a call")
-                                    .text_size(px(14.0))
-                                    .text_color(rgb(MUTED)),
-                            )
-                    }),
+                    native("iris.remote-video")
+                        .prop("callId", move || json!(call_id.get()))
+                        .flex_1(),
                 )
                 .child(when(
                     {
                         let call_id = call_id.clone();
                         let camera_muted = camera_muted.clone();
-                        move || !call_id.get().is_empty() && !camera_muted.get()
+                        move || {
+                            show_preview.get() && !call_id.get().is_empty() && !camera_muted.get()
+                        }
                     },
                     {
                         let call_id = call_id.clone();
@@ -839,14 +1107,16 @@ fn call_area(
                                 .text_size(px(14.0))
                                 .font_weight(FontWeight::SEMIBOLD),
                         )
-                        .child(button("Reject", DANGER).on_press({
+                        .child(button(icon!("phone-off"), "Reject", DANGER).on_press({
                             let reject = reject.clone();
                             move || reject()
                         }))
-                        .child(button("Answer", SUCCESS).on_press({
-                            let answer = answer.clone();
-                            move || answer()
-                        }))
+                        .child(
+                            button(icon!("phone-incoming"), "Answer", SUCCESS).on_press({
+                                let answer = answer.clone();
+                                move || answer()
+                            }),
+                        )
                 }
             },
         ))
@@ -859,6 +1129,7 @@ fn call_area(
                 .gap(px(12.0))
                 .child(
                     reactive_button(
+                        icon!("mic"),
                         {
                             let microphone_muted = microphone_muted.clone();
                             move || {
@@ -875,6 +1146,7 @@ fn call_area(
                 )
                 .child(
                     reactive_button(
+                        icon!("video"),
                         {
                             let camera_muted = camera_muted.clone();
                             move || {
@@ -891,14 +1163,11 @@ fn call_area(
                 )
                 .child(
                     reactive_button(
+                        icon!("pause"),
                         {
                             let state = state.clone();
                             move || {
-                                if state
-                                    .get()
-                                    .active_call()
-                                    .is_some_and(Call::is_held)
-                                {
+                                if state.get().active_call().is_some_and(Call::is_held) {
                                     "Resume"
                                 } else {
                                     "Hold"
@@ -909,7 +1178,8 @@ fn call_area(
                     )
                     .on_press(hold),
                 )
-                .child(button("Hang up", DANGER).on_press(hangup)),
+                .child(preview_button(show_preview))
+                .child(button(icon!("phone-off"), "Hang up", DANGER).on_press(hangup)),
         )
         .child(
             view()
@@ -936,28 +1206,14 @@ fn call_area(
                                     stats.packets_lost,
                                     stats.send_errors
                                 ),
-                                None => {
-                                    "RTP statistics will appear after media starts"
-                                        .to_owned()
-                                }
+                                None => "RTP statistics will appear after media starts".to_owned(),
                             }
                         }
                     })
                     .text_size(px(12.0))
                     .text_color(rgb(MUTED)),
                 )
-                .child(view().flex_1())
-                .child(
-                    text(move || {
-                        if destination.get().is_empty() {
-                            "Windows x64 | NSH Rust".to_owned()
-                        } else {
-                            destination.get()
-                        }
-                    })
-                    .text_size(px(12.0))
-                    .text_color(rgb(MUTED)),
-                ),
+                .child(view().flex_1()),
         )
 }
 
@@ -971,7 +1227,7 @@ fn source_picker(
     view()
         .gap(px(5.0))
         .child(
-            view()
+            press_target()
                 .h(px(40.0))
                 .px(px(12.0))
                 .rounded(px(9.0))
@@ -1005,9 +1261,8 @@ fn source_picker(
                     .number_of_lines(1),
                 )
                 .child(
-                    text(move || if open.get() { "▲" } else { "▼" })
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED)),
+                    when(move || open.get(), || icon!("chevron-up"))
+                        .otherwise(|| icon!("chevron-down")),
                 ),
         )
         .child(when(
@@ -1016,57 +1271,57 @@ fn source_picker(
                 move || open.get()
             },
             {
-            let client = client.clone();
-            let state = state.clone();
-            let open = open.clone();
-            move || {
-                view()
-                    .rounded(px(9.0))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(0x0d1725))
-                    .p(px(5.0))
-                    .child(dynamic({
-                        let client = client.clone();
-                        let state = state.clone();
-                        move || {
-                            let current = source_value(&state.get(), kind);
-                            let mut rows = vec![
-                                source_row(
-                                    client.clone(),
-                                    kind,
-                                    open.clone(),
-                                    "auto",
-                                    "Automatic (default device)",
-                                    current == "auto",
-                                ),
-                                source_row(
-                                    client.clone(),
-                                    kind,
-                                    open.clone(),
-                                    "null",
-                                    "Empty source (silent audio / gray identity card)",
-                                    current == "null",
-                                ),
-                            ];
-                            let devices = if kind == "audio" {
-                                state.get().audio_devices
-                            } else {
-                                state.get().video_devices
-                            };
-                            rows.extend(devices.into_iter().map(|device| {
-                                source_row(
-                                    client.clone(),
-                                    kind,
-                                    open.clone(),
-                                    &device.id,
-                                    &device.name,
-                                    current == device.id,
-                                )
-                            }));
-                            rows
-                        }
-                    }))
+                let client = client.clone();
+                let state = state.clone();
+                let open = open.clone();
+                move || {
+                    view()
+                        .rounded(px(9.0))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(0x0d1725))
+                        .p(px(5.0))
+                        .child(dynamic({
+                            let client = client.clone();
+                            let state = state.clone();
+                            move || {
+                                let current = source_value(&state.get(), kind);
+                                let mut rows = vec![
+                                    source_row(
+                                        client.clone(),
+                                        kind,
+                                        open.clone(),
+                                        "auto",
+                                        "Automatic (default device)",
+                                        current == "auto",
+                                    ),
+                                    source_row(
+                                        client.clone(),
+                                        kind,
+                                        open.clone(),
+                                        "null",
+                                        "Empty source (silent audio / gray identity card)",
+                                        current == "null",
+                                    ),
+                                ];
+                                let devices = if kind == "audio" {
+                                    state.get().audio_devices
+                                } else {
+                                    state.get().video_devices
+                                };
+                                rows.extend(devices.into_iter().map(|device| {
+                                    source_row(
+                                        client.clone(),
+                                        kind,
+                                        open.clone(),
+                                        &device.id,
+                                        &device.name,
+                                        current == device.id,
+                                    )
+                                }));
+                                rows
+                            }
+                        }))
                 }
             },
         ))
@@ -1081,11 +1336,15 @@ fn source_row(
     selected: bool,
 ) -> View {
     let source_value = source.to_owned();
-    view()
+    press_target()
         .min_h(px(34.0))
         .px(px(9.0))
         .rounded(px(7.0))
-        .bg(if selected { rgb(0x1d3c61) } else { rgb(0x0d1725) })
+        .bg(if selected {
+            rgb(0x1d3c61)
+        } else {
+            rgb(0x0d1725)
+        })
         .flex_row()
         .items_center()
         .gap(px(7.0))
@@ -1093,12 +1352,7 @@ fn source_row(
             client.set_media_input(kind, &source_value);
             open.set(false);
         })
-        .child(
-            text(if selected { "✓" } else { " " })
-                .w(px(16.0))
-                .text_size(px(12.0))
-                .text_color(rgb(SUCCESS)),
-        )
+        .child(when(move || selected, || icon!("check")))
         .child(
             text(label.to_owned())
                 .flex_1()
@@ -1133,5 +1387,21 @@ fn source_display_name(state: &UiState, kind: &str) -> String {
                 .map(|device| device.name.clone())
                 .unwrap_or_else(|| other.to_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dial_uri;
+
+    #[test]
+    fn resolves_dialed_extensions_and_preserves_sip_addresses() {
+        let account = "sip:alice@127.0.0.1:5060";
+        assert_eq!(dial_uri("123#", account), "sip:123%23@127.0.0.1:5060");
+        assert_eq!(dial_uri("bob@example.com", account), "sip:bob@example.com");
+        assert_eq!(
+            dial_uri("sips:bob@example.com", account),
+            "sips:bob@example.com"
+        );
     }
 }
