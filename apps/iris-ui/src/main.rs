@@ -26,7 +26,7 @@ fn main() -> impl std::process::Termination {
             title: "Iris".to_owned(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             app_id: "com.yupanzhao.iris".to_owned(),
-            size: (1240, 820),
+            size: (960, 640),
             ..Default::default()
         },
     )

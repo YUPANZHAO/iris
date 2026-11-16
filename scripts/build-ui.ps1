@@ -2,6 +2,7 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
     [string]$MediaAddress = "auto",
+    [string]$NshPath,
     [switch]$Check,
     [switch]$SkipCoreBuild
 )
@@ -11,12 +12,10 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $appDir = Join-Path $repoRoot "apps/iris-ui"
 $bridgeDir = Join-Path $repoRoot "build/windows/Release"
-$nsh = Join-Path $env:LOCALAPPDATA "nsh/bin/nsh.exe"
 $cargoBin = Join-Path $env:USERPROFILE ".cargo/bin"
 
-if (-not (Test-Path -LiteralPath $nsh)) {
-    throw "nsh was not found. Run the NSH Windows installer first."
-}
+. (Join-Path $PSScriptRoot "resolve-nsh.ps1")
+$nsh = Resolve-NshExecutable -ExplicitPath $NshPath
 
 if (-not $SkipCoreBuild) {
     & (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration

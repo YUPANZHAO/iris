@@ -1,5 +1,6 @@
 param(
-    [string]$MediaAddress = "auto"
+    [string]$MediaAddress = "auto",
+    [string]$NshPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,12 +9,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $appDir = Join-Path $repoRoot "apps/iris-ui"
 $releaseDir = Join-Path $repoRoot "build/windows/Release"
 $packageDir = Join-Path $appDir ".nsh/out/Iris"
-$nsh = Join-Path $env:LOCALAPPDATA "nsh/bin/nsh.exe"
 $cargoBin = Join-Path $env:USERPROFILE ".cargo/bin"
 
-if (-not (Test-Path -LiteralPath $nsh)) {
-    throw "nsh was not found. Run the NSH Windows installer first."
-}
+. (Join-Path $PSScriptRoot "resolve-nsh.ps1")
+$nsh = Resolve-NshExecutable -ExplicitPath $NshPath
 
 & (Join-Path $PSScriptRoot "build.ps1") -Configuration Release
 if ($LASTEXITCODE -ne 0) {

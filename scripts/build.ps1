@@ -1,6 +1,7 @@
 param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
+    [string]$PwshPath,
     [switch]$Clean,
     [switch]$RunTests
 )
@@ -12,6 +13,31 @@ $buildDir = Join-Path $repoRoot "build/windows"
 $vcpkgRoot = Join-Path $repoRoot ".tools/vcpkg"
 $vcpkgInstalled = Join-Path $repoRoot ".tools/vcpkg-installed"
 $vcpkgToolchain = Join-Path $vcpkgRoot "scripts/buildsystems/vcpkg.cmake"
+
+# Embedded terminals sometimes start with a PATH that omits the Windows system
+# directories. Restore them before invoking vcvars, vcpkg, or MSBuild.
+$systemRoot = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
+$systemBin = Join-Path $systemRoot "System32"
+$pathEntries = [System.Collections.Generic.List[string]]::new()
+foreach ($requiredPath in @($systemBin, $systemRoot)) {
+    if (-not $pathEntries.Contains($requiredPath)) {
+        $pathEntries.Add($requiredPath)
+    }
+}
+foreach ($pathEntry in ($env:Path -split ';')) {
+    if ($pathEntry -and -not $pathEntries.Contains($pathEntry)) {
+        $pathEntries.Add($pathEntry)
+    }
+}
+$env:Path = $pathEntries -join ';'
+
+$comspec = $env:ComSpec
+if (-not $comspec -or -not (Test-Path -LiteralPath $comspec -PathType Leaf)) {
+    $comspec = Join-Path $systemBin "cmd.exe"
+}
+if (-not (Test-Path -LiteralPath $comspec -PathType Leaf)) {
+    throw "cmd.exe was not found under $systemBin"
+}
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
 if (-not (Test-Path $vswhere)) {
@@ -39,7 +65,7 @@ if (-not (Test-Path $vcvars)) {
     throw "vcvars64.bat was not found under $vsPath"
 }
 
-$envLines = & cmd.exe /d /s /c ('"' + $vcvars + '" >nul && set')
+$envLines = & $comspec /d /s /c ('"' + $vcvars + '" >nul && set')
 foreach ($line in $envLines) {
     $separator = $line.IndexOf("=")
     if ($separator -gt 0) {
@@ -59,6 +85,70 @@ if (-not (Test-Path $vcpkgToolchain)) {
 }
 $env:VCPKG_ROOT = $vcpkgRoot
 $env:VCPKG_DOWNLOADS = Join-Path $repoRoot ".tools/vcpkg-downloads"
+
+function Resolve-IrisPwsh {
+    param(
+        [string]$ExplicitPath
+    )
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $candidates.Add($ExplicitPath)
+
+    Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue |
+        ForEach-Object { $candidates.Add($_.Source) }
+
+    if ($env:ProgramFiles) {
+        $candidates.Add((Join-Path $env:ProgramFiles "PowerShell/7/pwsh.exe"))
+        $candidates.Add((Join-Path $env:ProgramFiles "PowerShell/7-preview/pwsh.exe"))
+    }
+    if ($env:LOCALAPPDATA) {
+        $candidates.Add((Join-Path $env:LOCALAPPDATA "Microsoft/WindowsApps/pwsh.exe"))
+    }
+    if ($env:USERPROFILE) {
+        $candidates.Add((Join-Path $env:USERPROFILE "scoop/shims/pwsh.exe"))
+        $candidates.Add((Join-Path $env:USERPROFILE `
+            ".cache/codex-runtimes/codex-primary-runtime/dependencies/native/powershell/pwsh.exe"))
+    }
+    if ($env:ProgramData) {
+        $candidates.Add((Join-Path $env:ProgramData "chocolatey/bin/pwsh.exe"))
+    }
+
+    $toolsDir = Join-Path $vcpkgRoot "downloads/tools"
+    if (Test-Path -LiteralPath $toolsDir) {
+        Get-ChildItem -LiteralPath $toolsDir -Filter pwsh.exe -File -Recurse `
+            -ErrorAction SilentlyContinue |
+            ForEach-Object { $candidates.Add($_.FullName) }
+    }
+
+    $searched = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) {
+            continue
+        }
+
+        $fullPath = [IO.Path]::GetFullPath($candidate)
+        if (-not $searched.Add($fullPath) -or
+            -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            continue
+        }
+
+        $version = & $fullPath -NoLogo -NoProfile -Command `
+            '$PSVersionTable.PSVersion.ToString()' 2>$null
+        if ($LASTEXITCODE -eq 0 -and $version -match '^7\.') {
+            return $fullPath
+        }
+    }
+    return $null
+}
+
+$pwsh = Resolve-IrisPwsh -ExplicitPath $PwshPath
+if ($pwsh) {
+    $pwshDir = Split-Path -Parent $pwsh
+    $env:Path = "$pwshDir;$env:Path"
+    Write-Host "Using PowerShell Core: $pwsh"
+}
 
 $cmakeCandidates = @(
     (Get-Command cmake -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
