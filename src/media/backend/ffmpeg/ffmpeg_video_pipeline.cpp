@@ -22,6 +22,7 @@ extern "C" {
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -313,8 +314,8 @@ struct FfmpegVideoPipeline::Impl {
         }
         sink_ = nullptr;
         video_stream = -1;
-        assembling.clear();
-        receiving_fragment = false;
+        reset_access_unit();
+        access_unit_timestamp.reset();
         waiting_for_keyframe = true;
         null_image = {};
     }
@@ -686,8 +687,6 @@ struct FfmpegVideoPipeline::Impl {
     }
 
     void decode_loop() {
-        AVFrame* frame = av_frame_alloc();
-        AVPacket* packet = av_packet_alloc();
         bool have_expected = false;
         std::uint16_t expected_sequence = 0;
 
@@ -706,169 +705,146 @@ struct FfmpegVideoPipeline::Impl {
                 packets.erase(iterator);
             }
 
-            if (!have_expected) {
-                expected_sequence = received.sequence;
-                have_expected = true;
-            }
-            if (received.sequence != expected_sequence) {
+            const bool sequence_gap =
+                have_expected && received.sequence != expected_sequence;
+            if (sequence_gap) {
                 packets_lost.fetch_add(1);
-                assembling.clear();
-                receiving_fragment = false;
-                expected_sequence = received.sequence;
             }
+            have_expected = true;
             expected_sequence =
-                static_cast<std::uint16_t>(expected_sequence + 1);
+                static_cast<std::uint16_t>(received.sequence + 1);
 
             packets_received.fetch_add(1);
             bytes_received.fetch_add(received.payload.size());
-            consume_h264_payload(received);
+            consume_h264_payload(received, sequence_gap);
         }
-        av_packet_free(&packet);
-        av_frame_free(&frame);
     }
 
-    void consume_h264_payload(const ReceivedPacket& received) {
-        if (received.payload.empty()) {
-            return;
+    void reset_access_unit() {
+        assembling.clear();
+        receiving_fragment = false;
+        access_unit_damaged = false;
+    }
+
+    void finish_access_unit() {
+        if (!access_unit_damaged && !receiving_fragment && !assembling.empty()) {
+            decode_access_unit();
         }
-        const auto nal_type = received.payload[0] & 0x1f;
-        bool parameter_set = nal_type == 7 || nal_type == 8;
-        bool keyframe = nal_type == 5;
-        if (nal_type == 28 && received.payload.size() >= 3) {
-            keyframe = (received.payload[1] & 0x1f) == 5;
-        } else if (nal_type == 24) {
-            std::size_t offset = 1;
-            while (offset + 2 <= received.payload.size()) {
-                const auto nal_size =
-                    static_cast<std::size_t>(
-                        received.payload[offset] << 8 |
-                        received.payload[offset + 1]);
-                offset += 2;
-                if (offset + nal_size > received.payload.size()) {
-                    break;
-                }
-                const auto contained_type =
-                    received.payload[offset] & 0x1f;
-                parameter_set = parameter_set ||
-                    contained_type == 7 || contained_type == 8;
-                keyframe = keyframe || contained_type == 5;
-                offset += nal_size;
+        reset_access_unit();
+    }
+
+    void consume_h264_payload(const ReceivedPacket& received, bool sequence_gap) {
+        if (access_unit_timestamp != received.timestamp) {
+            // A timestamp change also closes a picture when a peer omits M.
+            if (sequence_gap) {
+                reset_access_unit();
+            } else {
+                finish_access_unit();
             }
+            access_unit_timestamp = received.timestamp;
+        } else if (sequence_gap) {
+            access_unit_damaged = true;
         }
-        if (waiting_for_keyframe && !parameter_set && !keyframe) {
-            if (received.marker) {
-                assembling.clear();
-            }
-            return;
-        }
-        if (nal_type == 7) {
-            cached_sps.assign(
-                received.payload.begin(), received.payload.end());
-        } else if (nal_type == 8) {
-            cached_pps.assign(
-                received.payload.begin(), received.payload.end());
-        }
-        if (nal_type == 28 && received.payload.size() >= 3) {
-            const auto fu_header = received.payload[1];
-            const bool start = (fu_header & 0x80) != 0;
-            const bool end = (fu_header & 0x40) != 0;
-            if (start) {
-                assembling.clear();
-                assembling.push_back(0);
-                assembling.push_back(0);
-                assembling.push_back(0);
-                assembling.push_back(1);
-                assembling.push_back(static_cast<std::uint8_t>(
-                    (received.payload[0] & 0xe0) |
-                    (fu_header & 0x1f)));
-                receiving_fragment = true;
-            }
-            if (receiving_fragment) {
-                assembling.insert(
-                    assembling.end(),
-                    received.payload.begin() + 2, received.payload.end());
-            }
-            if (end && receiving_fragment) {
-                if (keyframe && !cached_sps.empty() &&
-                    !cached_pps.empty()) {
-                    waiting_for_keyframe = false;
-                }
-                decode_access_unit();
-                assembling.clear();
-                receiving_fragment = false;
-            }
-        } else if (nal_type == 24) {
-            std::size_t offset = 1;
-            while (offset + 2 <= received.payload.size()) {
-                const auto nal_size =
-                    static_cast<std::size_t>(
-                        received.payload[offset] << 8 |
-                        received.payload[offset + 1]);
-                offset += 2;
-                if (offset + nal_size > received.payload.size()) {
-                    break;
-                }
-                assembling.insert(
-                    assembling.end(), std::initializer_list<std::uint8_t>{
-                        0, 0, 0, 1});
-                assembling.insert(
-                    assembling.end(),
-                    received.payload.begin() + offset,
-                    received.payload.begin() + offset + nal_size);
-                offset += nal_size;
-            }
-            if (received.marker) {
-                if (keyframe && !cached_sps.empty() &&
-                    !cached_pps.empty()) {
-                    waiting_for_keyframe = false;
-                }
-                decode_access_unit();
-                assembling.clear();
-            }
-        } else {
-            assembling.insert(
-                assembling.end(), std::initializer_list<std::uint8_t>{
-                    0, 0, 0, 1});
-            assembling.insert(
-                assembling.end(),
-                received.payload.begin(), received.payload.end());
-            if (received.marker) {
-                if (keyframe && !cached_sps.empty() &&
-                    !cached_pps.empty()) {
-                    waiting_for_keyframe = false;
-                }
-                decode_access_unit();
-                assembling.clear();
+
+        if (!access_unit_damaged) {
+            const auto& payload = received.payload;
+            const auto nal_type = payload[0] & 0x1f;
+            if (nal_type == 28) {
+                access_unit_damaged = !append_fragment(payload);
+            } else if (receiving_fragment) {
+                access_unit_damaged = true;
+            } else if (nal_type == 24) {
+                access_unit_damaged = !append_aggregation(payload);
+            } else if (nal_type >= 1 && nal_type <= 23) {
+                append_start_code(assembling);
+                assembling.insert(assembling.end(), payload.begin(), payload.end());
+            } else {
+                access_unit_damaged = true;
             }
         }
+        if (received.marker) {
+            finish_access_unit();
+        }
+    }
+
+    bool append_aggregation(const std::vector<std::uint8_t>& payload) {
+        std::size_t offset = 1;
+        while (offset + 2 <= payload.size()) {
+            const auto length = static_cast<std::size_t>(
+                (payload[offset] << 8) | payload[offset + 1]);
+            offset += 2;
+            if (length == 0 || length > payload.size() - offset) {
+                return false;
+            }
+            const auto type = payload[offset] & 0x1f;
+            if (type == 0 || type > 23) {
+                return false;
+            }
+            append_start_code(assembling);
+            assembling.insert(assembling.end(), payload.begin() + offset,
+                              payload.begin() + offset + length);
+            offset += length;
+        }
+        return offset > 1 && offset == payload.size();
+    }
+
+    bool append_fragment(const std::vector<std::uint8_t>& payload) {
+        if (payload.size() < 2) {
+            return false;
+        }
+        const auto header = payload[1];
+        const auto type = header & 0x1f;
+        const bool start = (header & 0x80) != 0;
+        const bool end = (header & 0x40) != 0;
+        if (type == 0 || type > 23) {
+            return false;
+        }
+        if (start) {
+            if (end || receiving_fragment) {
+                return false;
+            }
+            append_start_code(assembling);
+            assembling.push_back(static_cast<std::uint8_t>(
+                (payload[0] & 0xe0) | type));
+        } else if (!receiving_fragment) {
+            return false;
+        }
+        assembling.insert(assembling.end(), payload.begin() + 2, payload.end());
+        receiving_fragment = !end;
+        return true;
     }
 
     void decode_access_unit() {
-        if (assembling.empty()) {
+        bool has_picture = false;
+        bool keyframe = false;
+        bool has_sps = false;
+        bool has_pps = false;
+        for (const auto& nal : split_annex_b(assembling.data(), assembling.size())) {
+            const auto type = nal.data[0] & 0x1f;
+            has_picture = has_picture || (type >= 1 && type <= 5);
+            keyframe = keyframe || type == 5;
+            if (type == 7) {
+                cached_sps.assign(nal.data, nal.data + nal.size);
+                has_sps = true;
+            } else if (type == 8) {
+                cached_pps.assign(nal.data, nal.data + nal.size);
+                has_pps = true;
+            }
+        }
+        const bool have_parameters = !cached_sps.empty() && !cached_pps.empty();
+        if (!has_picture || (waiting_for_keyframe && !(keyframe && have_parameters))) {
             return;
         }
         std::vector<std::uint8_t> with_parameters;
-        if (!cached_sps.empty() && !cached_pps.empty()) {
-            const auto parameter_nals =
-                split_annex_b(assembling.data(), assembling.size());
-            const bool has_sps = std::any_of(
-                parameter_nals.begin(), parameter_nals.end(),
-                [](const NalUnit& nal) {
-                    return nal.size > 0 && (nal.data[0] & 0x1f) == 7;
-                });
-            if (!has_sps) {
-                append_start_code(with_parameters);
-                with_parameters.insert(
-                    with_parameters.end(),
-                    cached_sps.begin(), cached_sps.end());
-                append_start_code(with_parameters);
-                with_parameters.insert(
-                    with_parameters.end(),
-                    cached_pps.begin(), cached_pps.end());
-                with_parameters.insert(
-                    with_parameters.end(),
-                    assembling.begin(), assembling.end());
-            }
+        if (have_parameters && (!has_sps || !has_pps)) {
+            append_start_code(with_parameters);
+            with_parameters.insert(with_parameters.end(),
+                                   cached_sps.begin(), cached_sps.end());
+            append_start_code(with_parameters);
+            with_parameters.insert(with_parameters.end(),
+                                   cached_pps.begin(), cached_pps.end());
+            with_parameters.insert(with_parameters.end(),
+                                   assembling.begin(), assembling.end());
         }
         const auto& access_unit =
             with_parameters.empty() ? assembling : with_parameters;
@@ -876,6 +852,7 @@ struct FfmpegVideoPipeline::Impl {
         av_new_packet(packet, static_cast<int>(access_unit.size()));
         std::memcpy(packet->data, access_unit.data(), access_unit.size());
         if (avcodec_send_packet(receive_decoder, packet) >= 0) {
+            waiting_for_keyframe = false;
             AVFrame* frame = av_frame_alloc();
             while (avcodec_receive_frame(receive_decoder, frame) >= 0) {
                 render_frame(frame);
@@ -962,9 +939,11 @@ struct FfmpegVideoPipeline::Impl {
     std::condition_variable decode_condition;
     std::map<std::uint16_t, ReceivedPacket> packets;
     std::vector<std::uint8_t> assembling;
+    std::optional<std::uint32_t> access_unit_timestamp;
     std::vector<std::uint8_t> cached_sps;
     std::vector<std::uint8_t> cached_pps;
     bool receiving_fragment = false;
+    bool access_unit_damaged = false;
     bool waiting_for_keyframe = true;
     std::vector<std::uint8_t> parameter_sets;
     NullVideoImage null_image;

@@ -126,12 +126,13 @@ impl FrameStore {
         frames
             .get(&(call_id.to_owned(), kind))
             .cloned()
-            .or_else(|| {
-                frames
-                    .iter()
-                    .find(|((_, frame_kind), _)| *frame_kind == kind)
-                    .map(|(_, frame)| frame.clone())
-            })
+    }
+
+    pub fn discard_call(&self, call_id: &str) {
+        self.frames
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|(id, _), _| id != call_id);
     }
 
     fn register(

@@ -280,6 +280,11 @@ fn run_service(
             let mut state = state
                 .write()
                 .unwrap_or_else(|error| error.into_inner());
+            for call in &state.snapshot.calls {
+                if snapshot.calls.iter().all(|current| current.id != call.id) {
+                    frame_store.discard_call(&call.id);
+                }
+            }
             state.snapshot = snapshot;
             state.events = event_log.clone();
         }

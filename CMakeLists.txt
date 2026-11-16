@@ -256,6 +256,9 @@ if(IRIS_BUILD_TESTS)
     add_test(NAME iris-media-null-loopback
       COMMAND iris-media-loopback --null-input)
     set_tests_properties(iris-media-null-loopback PROPERTIES TIMEOUT 20)
+    add_test(NAME iris-media-stap-a-loopback
+      COMMAND iris-media-loopback --stap-a)
+    set_tests_properties(iris-media-stap-a-loopback PROPERTIES TIMEOUT 10)
   endif()
 
   if(WIN32 AND IRIS_BUILD_CLI AND IRIS_WITH_MEDIA)

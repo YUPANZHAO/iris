@@ -8,7 +8,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 namespace iris::media {
 namespace {
@@ -62,6 +64,15 @@ private:
 };
 
 struct MediaEngine::Session final : public IMediaPacketSink {
+private:
+    // Keep the first packets, which are the most likely to contain SPS/PPS.
+    // Leave space for live packets in the decoder's receive queue.
+    static constexpr std::size_t kStartupVideoPackets = 64;
+    std::mutex receiveMutex;
+    bool bufferStartupVideo = true;
+    std::vector<std::vector<std::uint8_t>> startupVideo;
+
+public:
     Session(CallId value,
             const std::string& localUri,
             const MediaRuntimeConfig& runtime,
@@ -94,6 +105,48 @@ struct MediaEngine::Session final : public IMediaPacketSink {
 
     MediaResult sendRtcp(MediaKind kind, ByteView packet) override {
         return send(kind, true, packet);
+    }
+
+    void attachPacketHandlers() {
+        auto handler = [this](MediaKind kind, bool rtcp, ByteView packet) {
+            std::lock_guard<std::mutex> lock(receiveMutex);
+            if (started) {
+                backend->onReceivedPacket(kind, rtcp, packet);
+            } else if (bufferStartupVideo && kind == MediaKind::Video &&
+                       !rtcp && packet.size > 0 &&
+                       startupVideo.size() < kStartupVideoPackets) {
+                startupVideo.emplace_back(packet.data, packet.data + packet.size);
+            }
+        };
+        audioTransport.setPacketHandler(handler);
+        videoTransport.setPacketHandler(std::move(handler));
+    }
+
+    void prepareReceive() {
+        std::lock_guard<std::mutex> lock(receiveMutex);
+        bufferStartupVideo = true;
+    }
+
+    void startReceive() {
+        std::lock_guard<std::mutex> lock(receiveMutex);
+        // Drain before admitting live packets so the decoder sees the
+        // parameter sets and slices in the order the transport received them.
+        if (config.videoEnabled) {
+            for (const auto& packet : startupVideo) {
+                backend->onReceivedPacket(MediaKind::Video, false,
+                                          {packet.data(), packet.size()});
+            }
+        }
+        startupVideo.clear();
+        bufferStartupVideo = false;
+        started.store(true, std::memory_order_release);
+    }
+
+    void stopReceive() {
+        std::lock_guard<std::mutex> lock(receiveMutex);
+        started.store(false, std::memory_order_release);
+        bufferStartupVideo = false;
+        startupVideo.clear();
     }
 
     MediaResult send(MediaKind kind, bool rtcp, ByteView packet) {
@@ -251,18 +304,7 @@ SdpResult MediaEngine::prepareOutgoing(
         return result;
     }
 
-    session->audioTransport.setPacketHandler(
-        [session = session.get()](MediaKind kind, bool rtcp, ByteView packet) {
-            if (session->started && session->backend) {
-                session->backend->onReceivedPacket(kind, rtcp, packet);
-            }
-        });
-    session->videoTransport.setPacketHandler(
-        [session = session.get()](MediaKind kind, bool rtcp, ByteView packet) {
-            if (session->started && session->backend) {
-                session->backend->onReceivedPacket(kind, rtcp, packet);
-            }
-        });
+    session->attachPacketHandlers();
     sessions_[callId.value] = std::move(session);
     return result;
 }
@@ -352,18 +394,7 @@ SdpResult MediaEngine::prepareAnswer(const CallId& callId,
     }
     session->remoteConfigured = true;
 
-    session->audioTransport.setPacketHandler(
-        [session = session.get()](MediaKind kind, bool rtcp, ByteView packet) {
-            if (session->started && session->backend) {
-                session->backend->onReceivedPacket(kind, rtcp, packet);
-            }
-        });
-    session->videoTransport.setPacketHandler(
-        [session = session.get()](MediaKind kind, bool rtcp, ByteView packet) {
-            if (session->started && session->backend) {
-                session->backend->onReceivedPacket(kind, rtcp, packet);
-            }
-        });
+    session->attachPacketHandlers();
     sessions_[callId.value] = std::move(session);
     return result;
 }
@@ -591,15 +622,17 @@ MediaResult MediaEngine::start(const CallId& callId) {
     if (!session->remoteConfigured) {
         return MediaResult::failure("remote media is not configured");
     }
+    session->prepareReceive();
     session->backend =
         std::make_unique<FfmpegMediaBackend>(
             runtime_, frame_sink_.get());
     auto result = session->backend->start(session->config, *session);
     if (!result.ok) {
+        session->stopReceive();
         session->backend.reset();
         return result;
     }
-    session->started = true;
+    session->startReceive();
     session->backendDirty = false;
     return MediaResult::success();
 }
@@ -609,7 +642,7 @@ MediaResult MediaEngine::suspend(const CallId& callId) {
     if (!session) {
         return MediaResult::failure("media session does not exist");
     }
-    session->started.store(false, std::memory_order_release);
+    session->stopReceive();
     if (session->backend) {
         session->backend->stop();
         session->backend.reset();
@@ -648,7 +681,7 @@ void MediaEngine::stop(const CallId& callId) noexcept {
     if (iterator == sessions_.end()) {
         return;
     }
-    iterator->second->started.store(false, std::memory_order_release);
+    iterator->second->stopReceive();
     iterator->second->audioTransport.close();
     iterator->second->videoTransport.close();
     if (iterator->second->backend) {
@@ -660,7 +693,7 @@ void MediaEngine::stop(const CallId& callId) noexcept {
 
 void MediaEngine::stopAll() noexcept {
     for (auto& entry : sessions_) {
-        entry.second->started.store(false, std::memory_order_release);
+        entry.second->stopReceive();
         entry.second->audioTransport.close();
         entry.second->videoTransport.close();
         if (entry.second->backend) {

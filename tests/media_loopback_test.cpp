@@ -1,13 +1,106 @@
+#include "media/backend/ffmpeg/ffmpeg_video_pipeline.h"
 #include "media/engine/media_engine.h"
 #include "media/transport/pj_ioqueue_service.h"
+#include "media/transport/rtp.h"
 
 #include <chrono>
 #include <cstring>
 #include <iostream>
 #include <thread>
+#include <vector>
+
+namespace {
+
+// Act as a peer that sends SPS and PPS in STAP-A rather than as individual
+// RTP packets. The receiver must decode inter frames between periodic IDRs.
+class StapALoopback : public iris::media::IMediaPacketSink {
+public:
+    explicit StapALoopback(iris::media::FfmpegVideoPipeline& pipeline)
+        : pipeline_(pipeline) {}
+
+    iris::media::MediaResult sendRtp(iris::MediaKind,
+                                    iris::media::ByteView datagram) override {
+        iris::media::RtpPacket packet;
+        if (!iris::media::parse_rtp(datagram.data, datagram.size, packet) ||
+            packet.payloadSize == 0) {
+            return iris::media::MediaResult::failure("invalid test RTP packet");
+        }
+        const auto nal_type = packet.payload[0] & 0x1f;
+        if (nal_type == 7 || nal_type == 8) {
+            aggregate_.push_back(static_cast<std::uint8_t>(packet.payloadSize >> 8));
+            aggregate_.push_back(static_cast<std::uint8_t>(packet.payloadSize));
+            aggregate_.insert(aggregate_.end(), packet.payload,
+                              packet.payload + packet.payloadSize);
+            return iris::media::MediaResult::success();
+        }
+        if (aggregate_.size() > 1) {
+            const auto result = deliver(packet, aggregate_.data(), aggregate_.size(), false);
+            aggregate_.resize(1);
+            if (!result.ok) {
+                return result;
+            }
+        }
+        return deliver(packet, packet.payload, packet.payloadSize, packet.header.marker);
+    }
+
+    iris::media::MediaResult sendRtcp(iris::MediaKind,
+                                     iris::media::ByteView) override {
+        return iris::media::MediaResult::success();
+    }
+
+private:
+    iris::media::MediaResult deliver(const iris::media::RtpPacket& packet,
+                                     const std::uint8_t* payload,
+                                     std::size_t size, bool marker) {
+        const auto datagram = sender_.create(packet.header.payloadType,
+                                             packet.header.timestamp,
+                                             payload, size, marker);
+        return pipeline_.onRtpPacket({datagram.data(), datagram.size()});
+    }
+
+    iris::media::FfmpegVideoPipeline& pipeline_;
+    iris::media::RtpSender sender_;
+    std::vector<std::uint8_t> aggregate_{0x78};
+};
+
+int test_stap_a() {
+    iris::MediaRuntimeConfig runtime;
+    runtime.videoInput = "null";
+    runtime.videoWidth = 320;
+    runtime.videoHeight = 180;
+    runtime.videoFps = 15;
+    runtime.renderVideo = false;
+    iris::MediaSessionConfig session;
+    session.localUri = "sip:stap-a@iris.local";
+    iris::media::FfmpegVideoPipeline pipeline;
+    StapALoopback loopback(pipeline);
+    const auto start = pipeline.start(runtime, session, loopback);
+    if (!start.ok) {
+        std::cerr << "STAP-A loopback failed to start: " << start.error << '\n';
+        return 1;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    iris::MediaStats stats;
+    do {
+        stats = {};
+        pipeline.addStats(stats);
+        if (stats.videoFramesDecoded >= 8) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    } while (std::chrono::steady_clock::now() < deadline);
+    pipeline.stop();
+    std::cout << "STAP-A loopback decoded " << stats.videoFramesDecoded << " frames\n";
+    return stats.videoFramesDecoded >= 8 ? 0 : 1;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "";
+    if (mode == "--stap-a") {
+        return test_stap_a();
+    }
     const bool capture_real_devices = mode == "--capture-real";
     const bool use_null_sources = mode == "--null-input";
     iris::MediaRuntimeConfig config;

@@ -12,8 +12,16 @@ use nsh_platform_windows as platform;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn main() -> impl std::process::Termination {
     env_logger::init();
+    #[cfg(target_os = "windows")]
+    platform::set_components(nsh_app_iris::__nsh_native_components_windows);
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../nsh.json")).expect("invalid Iris NSH manifest");
+    let window = nsh_core::desktop::MainWindowOptions::from_json(&manifest["window"])
+        .expect("invalid Iris main window configuration");
+    let root = platform::Root::of::<nsh_app_iris::App>().main_window(window);
     platform::run_app(
-        platform::AppSource::Rust(platform::Root::of::<nsh_app_iris::App>()),
+        platform::AppSource::Rust(root),
         platform::AppOptions {
             title: "Iris".to_owned(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
