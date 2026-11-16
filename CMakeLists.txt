@@ -28,6 +28,10 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pjproject/CMakeLists.txt"
   )
 endif()
 
+# External endpoints can send UDP INVITEs whose SDP and SIP headers together
+# exceed the default 4000-byte buffer. Keep the receive-data layout consistent
+# across pjproject and all Iris targets.
+add_compile_definitions(PJSIP_MAX_PKT_LEN=8192)
 add_subdirectory(third_party/pjproject EXCLUDE_FROM_ALL)
 
 if(MSVC)

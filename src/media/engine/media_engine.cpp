@@ -199,14 +199,15 @@ struct SelectedMedia {
 SelectedMedia select_media(
     const ParsedSdp& sdp,
     MediaKind kind,
-    const CodecRegistry& registry) {
+    const CodecRegistry& registry,
+    SdpPeer peer = SdpPeer::Offer) {
     for (const auto& media : sdp.media) {
         if (media.kind != kind || !media.supported ||
             media.protocol != "RTP/AVP" || media.port == 0 ||
             media.direction == MediaDirection::Inactive) {
             continue;
         }
-        const auto selection = registry.select(kind, media.formats);
+        const auto selection = registry.select(kind, media.formats, peer);
         if (selection.local) {
             return SelectedMedia{&media, selection};
         }
@@ -243,7 +244,7 @@ void set_negotiated_codec(MediaSessionConfig& config,
         selection.local->channels,
         selection.payloadType,
         selection.local->id,
-        selection.local->fmtp,
+        selection.localFmtp,
     });
 }
 
@@ -411,9 +412,9 @@ MediaResult MediaEngine::applyRemoteAnswer(
     const bool wasStarted = session->started.load(
         std::memory_order_acquire);
     const auto selected_audio = select_media(
-        answer, MediaKind::Audio, codec_registry_);
+        answer, MediaKind::Audio, codec_registry_, SdpPeer::Answer);
     const auto selected_video = select_media(
-        answer, MediaKind::Video, codec_registry_);
+        answer, MediaKind::Video, codec_registry_, SdpPeer::Answer);
     if (session->audioOpen) {
         if (!selected_audio.description ||
             selected_audio.description->port == 0) {

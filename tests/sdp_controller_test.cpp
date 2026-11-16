@@ -95,6 +95,9 @@ int main() {
     if (!expect(answer.ok, "answer generation failed") ||
         !expect(contains(answer.sdp, "m=audio 6000 RTP/AVP 112"),
                 "answer did not preserve the offered audio PT") ||
+        !expect(contains(answer.sdp,
+                         "a=fmtp:112 minptime=10;useinbandfec=1;maxaveragebitrate=48000"),
+                "answer omitted the local Opus receive bitrate") ||
         !expect(contains(answer.sdp, "m=video 6002 RTP/AVP 97"),
                 "answer did not preserve the offered video PT") ||
         !expect(!contains(answer.sdp, "192.0.2.0"),
@@ -119,6 +122,28 @@ int main() {
                 "send-only offer was rejected") ||
         !expect(contains(send_only_answer.sdp, "a=recvonly"),
                 "answer did not reverse the offered direction")) {
+        return 1;
+    }
+
+    const auto itc_offer = remote_offer.substr(
+        0, remote_offer.find("m=video")) +
+        "m=video 5014 RTP/AVP 113 112 110\r\n"
+        "a=rtpmap:113 H265/90000\r\n"
+        "a=rtpmap:112 H264/90000\r\n"
+        "a=fmtp:112 profile-level-id=64001f;packetization-mode=1\r\n"
+        "a=rtpmap:110 H264/90000\r\n"
+        "a=fmtp:110 profile-level-id=42801f;packetization-mode=1;max-br=8192\r\n"
+        "m=application 5016 UDP/BFCP *\r\n";
+    const auto itc_answer = create_sdp_answer(
+        both, local_ports, itc_offer, CodecRegistry(),
+        io_service.pool_factory());
+    if (!expect(itc_answer.ok &&
+                    contains(itc_answer.sdp, "m=video 6002 RTP/AVP 110\r\n") &&
+                    contains(itc_answer.sdp,
+                             "a=fmtp:110 packetization-mode=1;profile-level-id=42801f\r\n"),
+                "answer did not accept the offered H.264 Baseline format") ||
+        !expect(contains(itc_answer.sdp, "m=application 0 UDP/BFCP *\r\n"),
+                "answer did not reject the unsupported BFCP section")) {
         return 1;
     }
 
@@ -199,6 +224,42 @@ int main() {
                 prioritized_selection.local &&
                 prioritized_selection.local->id == "h264-primary",
             "codec selection did not honor local priority")) {
+        return 1;
+    }
+
+    const CodecRegistry defaults;
+    const auto select_h264 = [&defaults](const char* fmtp,
+                                         SdpPeer peer = SdpPeer::Offer) {
+        return defaults.select(iris::MediaKind::Video,
+                               {{105, "H264", 90000, 0, fmtp}}, peer);
+    };
+    if (!expect(contains(select_h264(
+                    "packetization-mode=1;profile-level-id=4D801E").localFmtp,
+                    "profile-level-id=4d801e"),
+                "equivalent constrained profile at a lower level was rejected") ||
+        !expect(contains(select_h264(
+                    "packetization-mode=1;profile-level-id=58a020").localFmtp,
+                    "profile-level-id=58a01f"),
+                "Baseline offer did not negotiate down to the local level") ||
+        !expect(contains(select_h264(
+                    "packetization-mode=1;profile-level-id=42f00b").localFmtp,
+                    "profile-level-id=42f00b"),
+                "Level 1b was not preserved") ||
+        !expect(contains(select_h264(
+                    "packetization-mode=1;profile-level-id=42e01e;"
+                    "level-asymmetry-allowed=1").localFmtp,
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"),
+                "mutual level asymmetry did not preserve the local level") ||
+        !expect(!select_h264("profile-level-id=42e01f").local,
+                "mismatched packetization modes were accepted") ||
+        !expect(!select_h264("packetization-mode=1;profile-level-id=64001f").local,
+                "unsupported High profile was accepted") ||
+        !expect(!select_h264("packetization-mode=1;profile-level-id=42801f",
+                             SdpPeer::Answer).local,
+                "an answer changed the offered profile") ||
+        !expect(!select_h264("packetization-mode=1;profile-level-id=42e020",
+                             SdpPeer::Answer).local,
+                "an answer raised the level without mutual asymmetry")) {
         return 1;
     }
 

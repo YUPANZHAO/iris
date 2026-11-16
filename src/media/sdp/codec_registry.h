@@ -23,13 +23,16 @@ struct CodecProfile {
     int channels = 0;
     int defaultPayloadType = -1;
     std::string fmtp;
+    bool acceptsH264Baseline = false;
 };
 
 struct CodecSelection {
     const CodecProfile* local = nullptr;
     int payloadType = -1;
-    std::string remoteFmtp;
+    std::string localFmtp;
 };
+
+enum class SdpPeer { Offer, Answer };
 
 class CodecRegistry final {
 public:
@@ -42,7 +45,8 @@ public:
 
     CodecSelection select(
         MediaKind kind,
-        const std::vector<RemoteCodecFormat>& formats) const;
+        const std::vector<RemoteCodecFormat>& formats,
+        SdpPeer peer = SdpPeer::Offer) const;
 
 private:
     static bool matches(const CodecProfile& local,

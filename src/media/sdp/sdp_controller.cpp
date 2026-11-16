@@ -389,9 +389,11 @@ SdpResult create_sdp_answer(
                 return SdpResult::failure(
                     "invalid local media transport");
             }
+            auto profile = *selected.local;
+            profile.fmtp = selected.localFmtp;
             append_media(
                 sdp, media.kind, ports.address, port,
-                {MediaCodec{*selected.local, selected.payloadType}},
+                {MediaCodec{std::move(profile), selected.payloadType}},
                 reverse_direction(media.direction));
             accepted_any = true;
         } else {
