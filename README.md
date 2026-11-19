@@ -13,8 +13,9 @@ src/core/           Runtime、账户、呼叫及任务调度
 src/sip/            PJSUA2 Endpoint、Account、Call 和状态适配器
 src/media/engine/          媒体会话状态机与稳定接口
 src/media/sdp/             SDP 策略、PJPROJECT 解析适配和 CodecRegistry
+src/media/pipeline/        CaptureSource/Encoder 接口、FrameView 和 packetizer
 src/media/transport/       PJLIB ioqueue、UDP RTP/RTCP 和基础 RTP 封装
-src/media/backend/ffmpeg/  FFmpeg 采集、编解码和测试媒体源
+src/media/backend/ffmpeg/  FFmpeg 采集、转换、编码和测试媒体源
 src/media/render/          Win32/WinMM 原生音视频渲染
 apps/iris-cli/      命令行测试客户端
 apps/iris-ui/       Windows NSH Rust 图形客户端

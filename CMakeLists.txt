@@ -54,11 +54,19 @@ add_library(iris STATIC
   src/core/runtime_impl.cpp
   src/core/task_dispatcher.cpp
   src/media/backend/ffmpeg/capture_sources.cpp
+  src/media/backend/ffmpeg/ffmpeg_audio_capture_source.cpp
+  src/media/backend/ffmpeg/ffmpeg_audio_encoder.cpp
   src/media/backend/ffmpeg/ffmpeg_audio_pipeline.cpp
+  src/media/backend/ffmpeg/ffmpeg_capture_reader.cpp
   src/media/backend/ffmpeg/ffmpeg_media_backend.cpp
+  src/media/backend/ffmpeg/ffmpeg_video_capture_source.cpp
+  src/media/backend/ffmpeg/ffmpeg_video_encoder.cpp
   src/media/backend/ffmpeg/ffmpeg_video_pipeline.cpp
   src/media/backend/ffmpeg/null_video_image.cpp
   src/media/engine/media_engine.cpp
+  src/media/pipeline/h264_bitstream.cpp
+  src/media/pipeline/h264_rtp_packetizer.cpp
+  src/media/pipeline/opus_rtp_packetizer.cpp
   src/media/render/native_renderer.cpp
   src/media/sdp/codec_registry.cpp
   src/media/sdp/sdp_controller.cpp
@@ -214,6 +222,21 @@ if(IRIS_BUILD_TESTS)
   )
   target_link_libraries(iris-media-sdp-test PRIVATE iris::iris pjlib)
   add_test(NAME iris-media-sdp-test COMMAND iris-media-sdp-test)
+
+  add_executable(iris-rtp-packetizer-test
+    tests/rtp_packetizer_test.cpp
+  )
+  target_compile_features(iris-rtp-packetizer-test PRIVATE cxx_std_17)
+  target_include_directories(iris-rtp-packetizer-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(iris-rtp-packetizer-test PRIVATE iris::iris)
+  if(WIN32 AND IRIS_WITH_MEDIA)
+    iris_copy_vcpkg_runtime(iris-rtp-packetizer-test)
+  endif()
+  add_test(NAME iris-rtp-packetizer-test
+    COMMAND iris-rtp-packetizer-test)
 
   add_executable(iris-media-sources-test tests/media_sources_test.cpp)
   target_compile_features(iris-media-sources-test PRIVATE cxx_std_17)

@@ -1,13 +1,13 @@
 #include "media/backend/ffmpeg/ffmpeg_audio_pipeline.h"
 
-#include "media/backend/ffmpeg/capture_sources.h"
+#include "media/backend/ffmpeg/ffmpeg_audio_capture_source.h"
+#include "media/backend/ffmpeg/ffmpeg_audio_encoder.h"
+#include "media/pipeline/opus_rtp_packetizer.h"
 #include "media/render/native_renderer.h"
 #include "media/transport/rtp.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/error.h>
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
@@ -55,18 +55,6 @@ std::uint8_t opus_payload_type(const MediaSessionConfig& config) {
     return kDefaultOpusPayloadType;
 }
 
-int interrupt_callback(void* opaque) {
-    return !static_cast<std::atomic<bool>*>(opaque)->load();
-}
-
-std::string ffmpeg_error(int error) {
-    char message[AV_ERROR_MAX_STRING_SIZE]{};
-    if (av_strerror(error, message, sizeof(message)) < 0) {
-        return "unknown FFmpeg error";
-    }
-    return message;
-}
-
 } // namespace
 
 struct FfmpegAudioPipeline::Impl {
@@ -78,85 +66,27 @@ struct FfmpegAudioPipeline::Impl {
         muted = false;
         running = true;
         payload_type = opus_payload_type(session);
-        next_audio_pts = 0;
-        pcm.clear();
 
-        auto resolution =
-            resolveCaptureSource(MediaKind::Audio, runtime.audioInput);
-        if (!resolution.ok()) {
-            running = false;
-            return MediaResult::failure(resolution.error);
-        }
-        source = std::move(resolution.source);
-        av_log(
-            nullptr, AV_LOG_INFO,
-            "Iris audio capture source: %s\n",
-            source.isNull ? "empty (silence)" : source.displayName.c_str());
-
-        if (!source.isNull) {
-            const AVInputFormat* input_format =
-                av_find_input_format(source.format.c_str());
-            AVDictionary* options = nullptr;
-            if (source.format == "lavfi") {
-                av_dict_set(&options, "realtime", "1", 0);
-            }
-
-            const int open_result = avformat_open_input(
-                &input, source.url.c_str(), input_format, &options);
-            av_dict_free(&options);
-            if (open_result < 0) {
-                running = false;
-                return MediaResult::failure(
-                    "failed to open audio input " + source.url +
-                    ": " + ffmpeg_error(open_result));
-            }
-            input->interrupt_callback.callback = &interrupt_callback;
-            input->interrupt_callback.opaque = &running;
-
-            audio_stream = av_find_best_stream(
-                input, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-            if (audio_stream < 0 ||
-                avformat_find_stream_info(input, nullptr) < 0) {
-                stop();
-                return MediaResult::failure(
-                    "audio input has no audio stream");
-            }
-
-            auto* stream = input->streams[audio_stream];
-            const AVCodec* decoder = avcodec_find_decoder(
-                stream->codecpar->codec_id);
-            if (!decoder) {
-                stop();
-                return MediaResult::failure("no audio decoder");
-            }
-            capture_decoder = avcodec_alloc_context3(decoder);
-            if (!capture_decoder ||
-                avcodec_parameters_to_context(
-                    capture_decoder, stream->codecpar) < 0 ||
-                avcodec_open2(capture_decoder, decoder, nullptr) < 0) {
-                stop();
-                return MediaResult::failure(
-                    "failed to open audio decoder");
-            }
-        }
-
-        const AVCodec* encoder = avcodec_find_encoder_by_name("libopus");
-        if (!encoder) {
+        encoder = std::make_unique<FfmpegAudioEncoder>();
+        const auto encoder_result = encoder->configure(
+            pipeline::AudioEncoderConfig{
+                kSampleRate,
+                kChannels,
+                runtime.audioBitrateKbps * 1000,
+                kFrameSamples,
+            },
+            [this](const pipeline::EncodedPacketView& packet) {
+                send_encoded_audio(packet);
+            });
+        if (!encoder_result.ok) {
             stop();
-            return MediaResult::failure("libopus encoder is unavailable");
+            return encoder_result;
         }
-        encoder_context = avcodec_alloc_context3(encoder);
-        encoder_context->sample_fmt = AV_SAMPLE_FMT_S16;
-        encoder_context->sample_rate = kSampleRate;
-        av_channel_layout_default(&encoder_context->ch_layout, kChannels);
-        encoder_context->bit_rate =
-            std::max(16000, runtime.audioBitrateKbps * 1000);
-        encoder_context->time_base = AVRational{1, kSampleRate};
-        encoder_context->frame_size = kFrameSamples;
-        if (avcodec_open2(encoder_context, encoder, nullptr) < 0) {
-            stop();
-            return MediaResult::failure("failed to open Opus encoder");
-        }
+        rtp_parameters = pipeline::RtpParameters{
+            payload_type,
+            static_cast<std::uint32_t>(kSampleRate),
+            1200,
+        };
 
         const AVCodec* opus_decoder =
             avcodec_find_decoder(AV_CODEC_ID_OPUS);
@@ -181,24 +111,37 @@ struct FfmpegAudioPipeline::Impl {
             }
         }
 
-        capture_thread = std::thread([this] {
-            if (source.isNull) {
-                null_capture_loop();
-            } else {
-                capture_loop();
-            }
-        });
+        auto concreteSource =
+            std::make_unique<FFmpegAudioCaptureSource>();
+        const auto captureResult = concreteSource->configure(
+            runtime, session);
+        if (!captureResult.ok) {
+            stop();
+            return captureResult;
+        }
+        concreteSource->setFrameSink(
+            [this](const pipeline::AudioFrameView& frame) {
+                encode_audio_frame(frame);
+            });
+        concreteSource->setMuted(false);
+        capture_source = std::move(concreteSource);
+
         decode_thread = std::thread([this] { decode_loop(); });
+        const auto sourceResult = capture_source->start();
+        if (!sourceResult.ok) {
+            stop();
+            return sourceResult;
+        }
         return MediaResult::success();
     }
 
     void stop() noexcept {
+        if (capture_source) {
+            capture_source->stop();
+        }
+        flush_encoder();
         running = false;
         queue_condition.notify_all();
-        if (capture_thread.joinable() &&
-            capture_thread.get_id() != std::this_thread::get_id()) {
-            capture_thread.join();
-        }
         if (decode_thread.joinable() &&
             decode_thread.get_id() != std::this_thread::get_id()) {
             decode_thread.join();
@@ -211,17 +154,11 @@ struct FfmpegAudioPipeline::Impl {
             std::lock_guard<std::mutex> lock(queue_mutex);
             packet_queue.clear();
         }
-        swr_free(&capture_swr);
         swr_free(&receive_swr);
-        avcodec_free_context(&capture_decoder);
-        avcodec_free_context(&encoder_context);
         avcodec_free_context(&receive_decoder);
-        if (input) {
-            avformat_close_input(&input);
-        }
-        pcm.clear();
+        capture_source.reset();
+        encoder.reset();
         sink_ = nullptr;
-        audio_stream = -1;
     }
 
     MediaResult on_rtp_packet(ByteView packet) {
@@ -249,6 +186,9 @@ struct FfmpegAudioPipeline::Impl {
 
     void set_muted(bool value) {
         muted = value;
+        if (capture_source) {
+            capture_source->setMuted(value);
+        }
     }
 
     void add_stats(MediaStats& result) {
@@ -261,162 +201,39 @@ struct FfmpegAudioPipeline::Impl {
         result.audioFramesDecoded += frames_decoded.load();
     }
 
-    void null_capture_loop() {
-        constexpr auto frame_duration =
-            std::chrono::microseconds(
-                kFrameSamples * 1000000LL / kSampleRate);
-        auto next_frame = std::chrono::steady_clock::now();
-        while (running) {
-            pcm.assign(
-                static_cast<std::size_t>(
-                    kFrameSamples * kChannels),
-                0);
-            encode_audio_frame();
-            pcm.clear();
-
-            next_frame += frame_duration;
-            const auto now = std::chrono::steady_clock::now();
-            if (next_frame > now) {
-                std::this_thread::sleep_until(next_frame);
-            } else {
-                next_frame = now + frame_duration;
-            }
-        }
-        flush_encoder();
-    }
-
-    void capture_loop() {
-        AVPacket* packet = av_packet_alloc();
-        AVFrame* frame = av_frame_alloc();
-        while (running && av_read_frame(input, packet) >= 0) {
-            if (packet->stream_index == audio_stream) {
-                if (avcodec_send_packet(capture_decoder, packet) >= 0) {
-                    while (avcodec_receive_frame(
-                               capture_decoder, frame) >= 0) {
-                        append_audio_frame(frame);
-                    }
-                }
-            }
-            av_packet_unref(packet);
-            if (source.format == "lavfi") {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-        }
-        flush_encoder();
-        av_frame_free(&frame);
-        av_packet_free(&packet);
-    }
-
-    bool ensure_capture_swr(const AVFrame* frame) {
-        if (capture_swr) {
-            return true;
-        }
-        AVChannelLayout output_layout;
-        av_channel_layout_default(&output_layout, kChannels);
-        AVChannelLayout input_layout;
-        if (frame->ch_layout.nb_channels > 0) {
-            av_channel_layout_copy(&input_layout, &frame->ch_layout);
-        } else {
-            av_channel_layout_default(&input_layout, kChannels);
-        }
-        const int status = swr_alloc_set_opts2(
-            &capture_swr,
-            &output_layout, AV_SAMPLE_FMT_S16, kSampleRate,
-            &input_layout,
-            static_cast<AVSampleFormat>(frame->format),
-            frame->sample_rate, 0, nullptr);
-        av_channel_layout_uninit(&input_layout);
-        av_channel_layout_uninit(&output_layout);
-        return status >= 0 && swr_init(capture_swr) >= 0;
-    }
-
-    void append_audio_frame(const AVFrame* frame) {
-        if (!ensure_capture_swr(frame)) {
-            return;
-        }
-        const auto output_capacity = av_rescale_rnd(
-            swr_get_delay(capture_swr, frame->sample_rate) +
-                frame->nb_samples,
-            kSampleRate, frame->sample_rate, AV_ROUND_UP);
-        std::vector<std::int16_t> converted(
-            static_cast<std::size_t>(output_capacity) * kChannels);
-        std::uint8_t* output[] = {
-            reinterpret_cast<std::uint8_t*>(converted.data())
-        };
-        const auto input = const_cast<const std::uint8_t**>(
-            frame->extended_data);
-        const auto samples = swr_convert(
-            capture_swr, output, output_capacity,
-            input, frame->nb_samples);
-        if (samples <= 0) {
-            return;
-        }
-        converted.resize(static_cast<std::size_t>(samples) * kChannels);
-        pcm.insert(pcm.end(), converted.begin(), converted.end());
-        while (pcm.size() >=
-               static_cast<std::size_t>(kFrameSamples * kChannels)) {
-            encode_audio_frame();
-            pcm.erase(
-                pcm.begin(),
-                pcm.begin() + kFrameSamples * kChannels);
+    void encode_audio_frame(
+        const pipeline::AudioFrameView& frame) {
+        if (encoder) {
+            (void)encoder->encode(frame);
         }
     }
 
-    void encode_audio_frame() {
-        AVFrame* frame = av_frame_alloc();
-        frame->format = AV_SAMPLE_FMT_S16;
-        frame->sample_rate = kSampleRate;
-        av_channel_layout_default(&frame->ch_layout, kChannels);
-        frame->nb_samples = kFrameSamples;
-        frame->pts = next_audio_pts;
-        if (av_frame_get_buffer(frame, 0) < 0) {
-            av_frame_free(&frame);
-            return;
-        }
-        const auto byte_count =
-            static_cast<std::size_t>(kFrameSamples * kChannels) *
-            sizeof(std::int16_t);
-        if (muted) {
-            std::memset(frame->data[0], 0, byte_count);
-        } else {
-            std::memcpy(
-                frame->data[0], pcm.data(), byte_count);
-        }
-        next_audio_pts += kFrameSamples;
-
-        if (avcodec_send_frame(encoder_context, frame) >= 0) {
-            AVPacket* packet = av_packet_alloc();
-            while (avcodec_receive_packet(encoder_context, packet) >= 0) {
-                auto datagram = rtp.create(
-                    payload_type,
-                    static_cast<std::uint32_t>(frame->pts),
-                    packet->data, packet->size, true);
-                auto send_result = sink_
-                    ? sink_->sendRtp(
-                          MediaKind::Audio,
-                          ByteView{datagram.data(), datagram.size()})
+    void send_encoded_audio(
+        const pipeline::EncodedPacketView& packet) {
+        auto send_result = packetizer.packetize(
+            packet,
+            static_cast<std::uint32_t>(packet.pts),
+            rtp_parameters,
+            [this](ByteView datagram) {
+                auto result = sink_
+                    ? sink_->sendRtp(MediaKind::Audio, datagram)
                     : MediaResult::failure(
                           "audio packet sink is unavailable");
-                if (send_result.ok) {
+                if (result.ok) {
                     packets_sent.fetch_add(1);
-                    bytes_sent.fetch_add(datagram.size());
+                    bytes_sent.fetch_add(datagram.size);
                 } else {
                     send_errors.fetch_add(1);
                 }
-                av_packet_unref(packet);
-            }
-            av_packet_free(&packet);
-        }
-        av_frame_free(&frame);
+                return result;
+            });
+        (void)send_result;
     }
 
     void flush_encoder() {
-        avcodec_send_frame(encoder_context, nullptr);
-        AVPacket* packet = av_packet_alloc();
-        while (avcodec_receive_packet(encoder_context, packet) >= 0) {
-            av_packet_unref(packet);
+        if (encoder) {
+            (void)encoder->flush();
         }
-        av_packet_free(&packet);
     }
 
     void decode_loop() {
@@ -499,21 +316,15 @@ struct FfmpegAudioPipeline::Impl {
         }
     }
 
-    CaptureSourceSpec source;
-    AVFormatContext* input = nullptr;
-    int audio_stream = -1;
-    AVCodecContext* capture_decoder = nullptr;
-    AVCodecContext* encoder_context = nullptr;
     AVCodecContext* receive_decoder = nullptr;
-    SwrContext* capture_swr = nullptr;
     SwrContext* receive_swr = nullptr;
     IMediaPacketSink* sink_ = nullptr;
-    RtpSender rtp;
+    std::unique_ptr<pipeline::IAudioCaptureSource> capture_source;
+    std::unique_ptr<FfmpegAudioEncoder> encoder;
+    pipeline::OpusRtpPacketizer packetizer;
+    pipeline::RtpParameters rtp_parameters;
     std::uint8_t payload_type = kDefaultOpusPayloadType;
     std::unique_ptr<NativeAudioRenderer> audio_renderer;
-    std::vector<std::int16_t> pcm;
-    std::int64_t next_audio_pts = 0;
-    std::thread capture_thread;
     std::thread decode_thread;
     std::atomic<bool> running{false};
     std::atomic<bool> muted{false};

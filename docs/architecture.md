@@ -51,8 +51,9 @@ src/sip/state_mapper.*       PJSUA 到 Iris 的状态映射
 src/media/engine/              媒体会话状态机与 IMediaBackend/Transport
 src/media/sdp/sdp_controller.* SDP 策略及 PJPROJECT parser 适配
 src/media/sdp/codec_registry.* 编码能力、优先级和远端 fmtp 匹配
+src/media/pipeline/          帧/编码包类型、编码接口和 RTP packetizer
 src/media/transport/           ioqueue、UDP RTP/RTCP 和基础 RTP 封装
-src/media/backend/ffmpeg/      FFmpeg 采集、编解码和测试媒体源
+src/media/backend/ffmpeg/      FFmpeg 采集、转换、编码和测试媒体源
 src/media/render/              Win32 视频窗口与 WinMM 音频输出
 apps/iris-ui/                  Rust-only Native Shell 图形客户端
 ```
@@ -164,15 +165,45 @@ Core 线程执行。`onCallTxOffer()` 强制保持 `PJSUA_CALL_MEDIA_APP_MANAGED
 
 ```text
 摄像头 / 麦克风
-    ↓ FFmpeg 或原生采集接口
-格式转换、缩放、重采样
-    ↓
-编码器
-    ↓
-RTP packetizer
+    ↓ FFmpegAudioCaptureSource / FFmpegVideoCaptureSource
+AudioFrameView / VideoFrameView
+    ↓ IAudioEncoder / IVideoEncoder
+Opus AVPacket / Annex-B H.264 AVPacket
+    ↓ OpusRtpPacketizer / H264RtpPacketizer
     ↓ 完整 RTP 包
 IMediaTransport.sendRtp()
 ```
+
+发送链路中的组件职责固定为：
+
+- `ICaptureSource`：统一 Source 生命周期和 FrameView 输出契约。
+- `IAudioCaptureSource` / `IVideoCaptureSource`：提供带类型的帧输出入口。
+- `FFmpegAudioCaptureSource` / `FFmpegVideoCaptureSource`：内部完成设备打开、
+  demux、解码、重采样或缩放，对外只发布标准 FrameView。
+- `FfmpegCaptureReader`：FFmpeg Source 内部复用的 demux/decode 辅助组件，
+  不是单独的 Source。
+- encoder：只负责输出 Opus packet 或 H.264 access unit。
+- packetizer：只处理 codec packet 到 RTP 的映射、NAL 分片和 marker。
+- pipeline：只连接组件、计算 RTP 时间戳和维护生命周期。
+
+`pipeline::AudioFrameView`、`VideoFrameView`、`EncodedPacketView` 和
+`RtpParameters` 是各层之间的稳定数据边界。视图只在同步回调期间有效，跨线程
+保存时必须复制或转移所有权。
+
+Source 可以像流节点一样组合。水印、旋转、裁剪或自定义图像生成器不需要新增
+独立 Converter 接口，而是实现 `IVideoCaptureSource` 并把上游 Source 作为
+内部输入：
+
+```text
+FFmpegVideoCaptureSource
+    ↓ VideoFrameView
+WatermarkVideoCaptureSource（也是 IVideoCaptureSource）
+    ↓ 加工后的 VideoFrameView
+VideoEncoder
+```
+
+因此 Pipeline 始终面对 `IVideoCaptureSource`，可以直接连接 FFmpeg Source，
+也可以把加工 Source 当作 Capture 接入，编码器无需感知上游来源类型。
 
 ### 接收
 
@@ -199,6 +230,9 @@ IMediaBackend.onReceivedPacket()
 - 音频格式和采样率转换
 - Opus、H.264 等部分编解码
 
+上述格式加工封装在具体 `FFmpegAudioCaptureSource` /
+`FFmpegVideoCaptureSource` 内，是 Source 到标准 FrameView 输出边界的一部分。
+
 FFmpeg 不负责：
 
 - SIP 和 SDP 事务
@@ -210,6 +244,12 @@ FFmpeg 不负责：
 过渡阶段会提供项目自有的基础 RTP packetizer 和 RTCP 处理逻辑，使
 FFmpeg backend 能独立完成首轮媒体验证。后续 WebRTC backend 会替换这些
 策略，但保持 `IMediaBackend` 和 `IMediaTransport` 边界不变。
+
+RTP packetizer 位于 `src/media/pipeline/`，不依赖 FFmpeg、采集设备或 socket。
+`H264RtpPacketizer` 支持单 NAL、SPS/PPS 重发和 FU-A；`OpusRtpPacketizer`
+保持一个编码 packet 对应一个 RTP packet。编码器通过 `IAudioEncoder`、
+`IVideoEncoder` 接入，后续增加 NVENC、QSV、MediaCodec 等实现时不需要修改
+packetizer 和 transport。
 
 ## WebRTC 边界
 
