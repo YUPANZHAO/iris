@@ -101,7 +101,7 @@ try {
     )
     foreach ($expected in $requiredClientOutput) {
         if (-not $clientOutput.Contains($expected)) {
-            throw "client output is missing: $expected"
+            throw "client output is missing: $expected`n$clientOutput`n$clientError`nserver:`n$serverOutput`n$serverError"
         }
     }
     if (-not $serverOutput.Contains('Auto-answered call-1')) {

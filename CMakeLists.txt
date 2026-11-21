@@ -51,28 +51,20 @@ add_library(iris STATIC
   src/api/runtime.cpp
   src/core/account_manager.cpp
   src/core/call_manager.cpp
+  src/core/media_session_manager.cpp
   src/core/runtime_impl.cpp
   src/core/task_dispatcher.cpp
-  src/media/backend/ffmpeg/capture_sources.cpp
-  src/media/backend/ffmpeg/ffmpeg_audio_capture_source.cpp
-  src/media/backend/ffmpeg/ffmpeg_audio_encoder.cpp
-  src/media/backend/ffmpeg/ffmpeg_audio_pipeline.cpp
-  src/media/backend/ffmpeg/ffmpeg_capture_reader.cpp
-  src/media/backend/ffmpeg/ffmpeg_media_backend.cpp
-  src/media/backend/ffmpeg/ffmpeg_video_capture_source.cpp
-  src/media/backend/ffmpeg/ffmpeg_video_encoder.cpp
-  src/media/backend/ffmpeg/ffmpeg_video_pipeline.cpp
-  src/media/backend/ffmpeg/null_video_image.cpp
-  src/media/engine/media_engine.cpp
-  src/media/pipeline/h264_bitstream.cpp
-  src/media/pipeline/h264_rtp_packetizer.cpp
-  src/media/pipeline/opus_rtp_packetizer.cpp
-  src/media/render/native_renderer.cpp
-  src/media/sdp/codec_registry.cpp
-  src/media/sdp/sdp_controller.cpp
-  src/media/transport/pj_ioqueue_service.cpp
-  src/media/transport/pj_ioqueue_udp_transport.cpp
-  src/media/transport/rtp.cpp
+  src/media/capture/ffmpeg_capture.cpp
+  src/media/capture/device_query.cpp
+  src/media/codec/ffmpeg_codec_impl.cpp
+  src/media/control/media_control.cpp
+  src/media/control/sdp_media_control.cpp
+  src/media/engine/media_buffer.cpp
+  src/media/sdp/sdp_components.cpp
+  src/media/stream/audio_stream.cpp
+  src/media/stream/stream_internal.cpp
+  src/media/stream/video_stream.cpp
+  src/media/transport/rtp_transport.cpp
   src/sip/pj_account.cpp
   src/sip/pj_call.cpp
   src/sip/pj_endpoint.cpp
@@ -212,31 +204,19 @@ if(IRIS_BUILD_TESTS)
   add_test(NAME iris-media-interface-compile
     COMMAND iris-media-interface-compile)
 
-  add_executable(iris-media-sdp-test
-    tests/sdp_controller_test.cpp
+  add_executable(iris-media-v2-test
+    tests/media_v2_test.cpp
   )
-  target_compile_features(iris-media-sdp-test PRIVATE cxx_std_17)
-  target_include_directories(iris-media-sdp-test PRIVATE
+  target_compile_features(iris-media-v2-test PRIVATE cxx_std_17)
+  target_include_directories(iris-media-v2-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
-  target_link_libraries(iris-media-sdp-test PRIVATE iris::iris pjlib)
-  add_test(NAME iris-media-sdp-test COMMAND iris-media-sdp-test)
-
-  add_executable(iris-rtp-packetizer-test
-    tests/rtp_packetizer_test.cpp
-  )
-  target_compile_features(iris-rtp-packetizer-test PRIVATE cxx_std_17)
-  target_include_directories(iris-rtp-packetizer-test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
-  target_link_libraries(iris-rtp-packetizer-test PRIVATE iris::iris)
+  target_link_libraries(iris-media-v2-test PRIVATE iris::iris)
   if(WIN32 AND IRIS_WITH_MEDIA)
-    iris_copy_vcpkg_runtime(iris-rtp-packetizer-test)
+    iris_copy_vcpkg_runtime(iris-media-v2-test)
   endif()
-  add_test(NAME iris-rtp-packetizer-test
-    COMMAND iris-rtp-packetizer-test)
+  add_test(NAME iris-media-v2-test COMMAND iris-media-v2-test)
 
   add_executable(iris-media-sources-test tests/media_sources_test.cpp)
   target_compile_features(iris-media-sources-test PRIVATE cxx_std_17)
@@ -249,23 +229,6 @@ if(IRIS_BUILD_TESTS)
   endif()
   add_test(NAME iris-media-sources-test
     COMMAND iris-media-sources-test)
-
-  add_executable(iris-pj-ioqueue-transport-test
-    tests/pj_ioqueue_transport_test.cpp
-  )
-  target_compile_features(
-    iris-pj-ioqueue-transport-test PRIVATE cxx_std_17)
-  target_include_directories(
-    iris-pj-ioqueue-transport-test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
-  target_link_libraries(
-    iris-pj-ioqueue-transport-test PRIVATE iris::iris pjlib)
-  if(WIN32 AND IRIS_WITH_MEDIA)
-    iris_copy_vcpkg_runtime(iris-pj-ioqueue-transport-test)
-  endif()
-  add_test(NAME iris-pj-ioqueue-transport-test
-    COMMAND iris-pj-ioqueue-transport-test)
 
   if(IRIS_WITH_MEDIA)
     add_executable(iris-media-loopback tests/media_loopback_test.cpp)
@@ -283,9 +246,6 @@ if(IRIS_BUILD_TESTS)
     add_test(NAME iris-media-null-loopback
       COMMAND iris-media-loopback --null-input)
     set_tests_properties(iris-media-null-loopback PROPERTIES TIMEOUT 20)
-    add_test(NAME iris-media-stap-a-loopback
-      COMMAND iris-media-loopback --stap-a)
-    set_tests_properties(iris-media-stap-a-loopback PROPERTIES TIMEOUT 10)
   endif()
 
   if(WIN32 AND IRIS_BUILD_CLI AND IRIS_WITH_MEDIA)

@@ -1,7 +1,7 @@
 #include "core/call_manager.h"
 
+#include "core/media_session_manager.h"
 #include "internal/identifier.h"
-#include "media/engine/media_engine.h"
 #include "sip/state_mapper.h"
 
 #include <algorithm>
@@ -23,7 +23,7 @@ std::uint64_t now_ms() {
 
 CallManager::CallManager(RuntimeServices& services,
                          AccountManager& accounts,
-                         iris::media::MediaEngine& media)
+                         MediaSessionManager& media)
     : services_(services), accounts_(accounts), media_(media) {
 }
 
@@ -116,63 +116,35 @@ void CallManager::hangup_call(const CallId& id) {
 }
 
 void CallManager::hold_call(const CallId& id) {
-    auto call = find_call(id);
-    auto offer = media_.createReinviteOffer(
-        id, MediaDirection::SendOnly, MediaDirection::SendOnly);
-    if (!offer.ok) {
-        throw std::runtime_error(
-            "failed to create hold SDP: " + offer.error);
-    }
-    pj::CallOpParam param(false);
-    param.opt.audioCount = media_.audioEnabled() ? 1 : 0;
-    param.opt.videoCount = media_.videoEnabled() ? 1 : 0;
-    param.opt.flag |= PJSUA_CALL_MEDIA_APP_MANAGED;
-    param.sdp.wholeSdp = std::move(offer.sdp);
-
     auto iterator = calls_.find(id.value);
     if (iterator == calls_.end()) {
         throw std::out_of_range("unknown call: " + id.value);
     }
-    try {
-        call->reinvite(param);
-        iterator->second.pendingOperation = PendingOperation::Hold;
-        iterator->second.snapshot.stateText = "local hold requested";
-        publish_call_event(
-            iterator->second.snapshot, "local hold requested", 0);
-    } catch (...) {
-        iterator->second.pendingOperation = PendingOperation::None;
-        throw;
+    const auto result = media_.suspend(id);
+    if (!result.ok) {
+        throw std::runtime_error("failed to hold media: " + result.error);
     }
+    iterator->second.pendingOperation = PendingOperation::None;
+    iterator->second.snapshot.state = CallState::LocallyHeld;
+    iterator->second.snapshot.stateText = "locally held";
+    publish_call_event(
+        iterator->second.snapshot, "locally held", 0);
 }
 
 void CallManager::resume_call(const CallId& id) {
-    auto call = find_call(id);
-    auto offer = media_.createReinviteOffer(
-        id, MediaDirection::SendRecv, MediaDirection::SendRecv);
-    if (!offer.ok) {
-        throw std::runtime_error(
-            "failed to create resume SDP: " + offer.error);
-    }
-    pj::CallOpParam param(false);
-    param.opt.audioCount = media_.audioEnabled() ? 1 : 0;
-    param.opt.videoCount = media_.videoEnabled() ? 1 : 0;
-    param.opt.flag |= PJSUA_CALL_MEDIA_APP_MANAGED;
-    param.sdp.wholeSdp = std::move(offer.sdp);
-
     auto iterator = calls_.find(id.value);
     if (iterator == calls_.end()) {
         throw std::out_of_range("unknown call: " + id.value);
     }
-    try {
-        call->reinvite(param);
-        iterator->second.pendingOperation = PendingOperation::Resume;
-        iterator->second.snapshot.stateText = "resume requested";
-        publish_call_event(
-            iterator->second.snapshot, "call resume requested", 0);
-    } catch (...) {
-        iterator->second.pendingOperation = PendingOperation::None;
-        throw;
+    const auto result = media_.start(id);
+    if (!result.ok) {
+        throw std::runtime_error("failed to resume media: " + result.error);
     }
+    iterator->second.pendingOperation = PendingOperation::None;
+    iterator->second.snapshot.state = CallState::Confirmed;
+    iterator->second.snapshot.stateText = "resumed";
+    publish_call_event(
+        iterator->second.snapshot, "resumed", 0);
 }
 
 std::vector<CallSnapshot> CallManager::calls() const {

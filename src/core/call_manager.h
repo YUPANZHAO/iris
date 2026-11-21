@@ -13,17 +13,15 @@
 #include <unordered_map>
 #include <vector>
 
-namespace iris::media {
-class MediaEngine;
-}
-
 namespace iris::core {
+
+class MediaSessionManager;
 
 class CallManager final : public sip::CallCallbackHandler {
 public:
     CallManager(RuntimeServices& services,
                 AccountManager& accounts,
-                iris::media::MediaEngine& media);
+                MediaSessionManager& media);
     ~CallManager() override;
 
     CallManager(const CallManager&) = delete;
@@ -90,7 +88,7 @@ private:
 
     RuntimeServices& services_;
     AccountManager& accounts_;
-    iris::media::MediaEngine& media_;
+    MediaSessionManager& media_;
     std::unordered_map<std::string, CallRecord> calls_;
     std::atomic<std::uint64_t> next_call_id_{0};
     std::atomic<std::size_t> call_count_{0};

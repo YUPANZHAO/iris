@@ -19,12 +19,10 @@ class AccountManager;
 class CallManager;
 }
 
-namespace iris::media {
-class MediaEngine;
-class PjIoqueueService;
-}
-
 namespace iris {
+namespace core {
+class MediaSessionManager;
+}
 
 class RuntimeImpl final : public core::RuntimeServices,
                           public core::IncomingCallSink {
@@ -76,9 +74,8 @@ private:
     RuntimeConfig config_;
     mutable core::TaskDispatcher dispatcher_;
     sip::PjEndpoint endpoint_;
-    std::unique_ptr<media::PjIoqueueService> io_service_;
     std::unique_ptr<core::AccountManager> account_manager_;
-    std::unique_ptr<media::MediaEngine> media_engine_;
+    std::unique_ptr<core::MediaSessionManager> media_sessions_;
     std::unique_ptr<core::CallManager> call_manager_;
 
     mutable std::mutex event_mutex_;

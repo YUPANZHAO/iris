@@ -2,8 +2,7 @@
 
 #include "core/account_manager.h"
 #include "core/call_manager.h"
-#include "media/engine/media_engine.h"
-#include "media/transport/pj_ioqueue_service.h"
+#include "core/media_session_manager.h"
 
 #include <chrono>
 #include <stdexcept>
@@ -102,7 +101,7 @@ void RuntimeImpl::resume_call(const CallId& id) {
 
 void RuntimeImpl::set_audio_muted(const CallId& id, bool muted) {
     dispatcher_.invoke([this, id, muted] {
-        const auto result = media_engine_->setAudioMuted(id, muted);
+        const auto result = media_sessions_->setAudioMuted(id, muted);
         if (!result.ok) {
             throw std::runtime_error(result.error);
         }
@@ -111,7 +110,7 @@ void RuntimeImpl::set_audio_muted(const CallId& id, bool muted) {
 
 void RuntimeImpl::set_video_muted(const CallId& id, bool muted) {
     dispatcher_.invoke([this, id, muted] {
-        const auto result = media_engine_->setVideoMuted(id, muted);
+        const auto result = media_sessions_->setVideoMuted(id, muted);
         if (!result.ok) {
             throw std::runtime_error(result.error);
         }
@@ -121,13 +120,13 @@ void RuntimeImpl::set_video_muted(const CallId& id, bool muted) {
 void RuntimeImpl::set_media_input(MediaKind kind,
                                   const std::string& source) {
     dispatcher_.invoke([this, kind, source] {
-        media_engine_->setInputSource(kind, source);
+        media_sessions_->setInputSource(kind, source);
     }).get();
 }
 
 std::string RuntimeImpl::media_input(MediaKind kind) const {
     return dispatcher_.invoke([this, kind] {
-        return media_engine_->inputSource(kind);
+        return media_sessions_->inputSource(kind);
     }).get();
 }
 
@@ -135,7 +134,7 @@ void RuntimeImpl::setVideoFrameCallback(
     VideoFrameCallback callback) {
     dispatcher_.invoke(
         [this, callback = std::move(callback)] {
-            media_engine_->setVideoFrameCallback(callback);
+            media_sessions_->setVideoFrameCallback(callback);
         }).get();
 }
 
@@ -153,7 +152,7 @@ std::vector<CallSnapshot> RuntimeImpl::calls() const {
 
 MediaStats RuntimeImpl::media_stats(const CallId& id) const {
     return dispatcher_.invoke([this, id] {
-        return media_engine_->stats(id);
+        return media_sessions_->stats(id);
     }).get();
 }
 
@@ -200,18 +199,13 @@ void RuntimeImpl::accept_incoming_call(sip::PjAccount& account,
 
 void RuntimeImpl::initialize() {
     endpoint_.initialize(config_);
-    io_service_ =
-        std::make_unique<media::PjIoqueueService>();
-    if (!io_service_->ok()) {
-        throw std::runtime_error(io_service_->error());
-    }
-    media_engine_ = std::make_unique<media::MediaEngine>(
-        std::move(config_.media), *io_service_);
+    media_sessions_ = std::make_unique<core::MediaSessionManager>(
+        std::move(config_.media));
     account_manager_ =
         std::make_unique<core::AccountManager>(*this, *this);
     call_manager_ =
         std::make_unique<core::CallManager>(
-            *this, *account_manager_, *media_engine_);
+            *this, *account_manager_, *media_sessions_);
 }
 
 void RuntimeImpl::shutdown() noexcept {
@@ -246,13 +240,12 @@ void RuntimeImpl::shutdown() noexcept {
             if (account_manager_) {
                 account_manager_->clear();
             }
-            if (media_engine_) {
-                media_engine_->stopAll();
+            if (media_sessions_) {
+                media_sessions_->stopAll();
             }
 
             call_manager_.reset();
-            media_engine_.reset();
-            io_service_.reset();
+            media_sessions_.reset();
             account_manager_.reset();
             endpoint_.shutdown();
         }).get();
