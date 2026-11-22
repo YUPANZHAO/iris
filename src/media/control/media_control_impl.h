@@ -11,19 +11,6 @@
 
 namespace iris::media::v2 {
 
-class StreamMuxSink final : public IEncodedPacketSink {
-public:
-    void setStream(StreamId id,
-                   std::weak_ptr<IEncodedPacketStream> stream);
-    void removeStream(StreamId id);
-    void onEncodedPacket(const EncodedPacket& packet) override;
-
-private:
-    std::mutex mutex_;
-    std::unordered_map<StreamId, std::weak_ptr<IEncodedPacketStream>>
-        streams_;
-};
-
 class MediaControl : public IMediaControl {
 public:
     MediaControl();
@@ -42,21 +29,29 @@ public:
     MediaStats stats() const override;
 
     Status setRemoteEndpoint(const std::string& endpoint);
+    Status setRemoteEndpoint(StreamId id, const std::string& endpoint);
     std::string localEndpoint() const;
+    std::string localEndpoint(StreamId id) const;
     TransportStats transportStats() const;
     const MediaControlConfig& config() const noexcept { return config_; }
 
 private:
+    struct StreamEntry {
+        EncodedPacketStreamPtr stream;
+        std::shared_ptr<RTPTransport> transport;
+        std::string remoteEndpoint;
+    };
+
     Status configureStream(const StreamConfig& config,
                            EncodedPacketStreamPtr stream);
-    void updateMux();
-    TransportConfig transportConfig() const;
+    AttributeMap transportConfig(const StreamConfig& stream,
+                                 const std::string& remoteEndpoint,
+                                 bool useConfiguredPort) const;
 
     mutable std::mutex mutex_;
     MediaControlConfig config_;
-    std::shared_ptr<RTPTransport> transport_;
-    std::shared_ptr<StreamMuxSink> mux_;
-    std::unordered_map<StreamId, EncodedPacketStreamPtr> streams_;
+    std::unordered_map<StreamId, StreamEntry> streams_;
+    std::unordered_map<std::string, std::string> reservedPorts_;
     bool initialized_ = false;
 };
 

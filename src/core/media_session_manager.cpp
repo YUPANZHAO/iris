@@ -6,7 +6,6 @@
 #include "media/engine/media_buffer.h"
 #include "media/sdp/sdp_components.h"
 #include "media/stream/audio_stream.h"
-#include "media/stream/stream_internal.h"
 #include "media/stream/video_stream.h"
 
 extern "C" {
@@ -365,9 +364,7 @@ struct MediaSessionManager::Impl {
                 std::make_shared<VideoCallbackSink>(
                     callbacks, session.callId,
                     VideoFrameKind::Remote);
-            mv::stream_internal::setVideoOutputSink(
-                session.videoStream.get(),
-                session.remoteVideoSink);
+            session.videoStream->setOutputSink(session.remoteVideoSink);
         }
     }
 
@@ -642,8 +639,7 @@ void MediaSessionManager::stop(const CallId& callId) noexcept {
     impl_->stopCaptures(session);
     session.control.stopAll();
     if (session.videoStream) {
-        mv::stream_internal::setVideoOutputSink(
-            session.videoStream.get(),
+        session.videoStream->setOutputSink(
             std::weak_ptr<mv::IVideoFrameSink>{});
     }
     impl_->sessions.erase(iterator);

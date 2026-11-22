@@ -1,5 +1,8 @@
 #include "media/control/sdp_media_control.h"
 
+#include "media/stream/audio_stream.h"
+#include "media/stream/video_stream.h"
+
 #include <algorithm>
 #include <string>
 #include <utility>
@@ -11,31 +14,30 @@ Status failure(std::string message) {
     return Status{false, 1, std::move(message)};
 }
 
-void applyLocalEndpoint(const std::string& endpoint,
-                        SdpNegotiationInput* input) {
+bool parseEndpoint(const std::string& endpoint,
+                   std::string* address,
+                   std::uint16_t* port) {
     const auto separator = endpoint.rfind(':');
-    if (!input || separator == std::string::npos) {
-        return;
+    if (!address || !port || separator == std::string::npos) {
+        return false;
     }
-    auto address = endpoint.substr(0, separator);
-    if (address == "0.0.0.0" || address.empty()) {
-        address = "127.0.0.1";
+    auto parsedAddress = endpoint.substr(0, separator);
+    if (parsedAddress == "0.0.0.0" || parsedAddress.empty()) {
+        parsedAddress = "127.0.0.1";
     }
-    std::uint16_t port = 0;
+    std::uint16_t parsedPort = 0;
     try {
-        port = static_cast<std::uint16_t>(
+        parsedPort = static_cast<std::uint16_t>(
             std::stoul(endpoint.substr(separator + 1)));
     } catch (...) {
-        return;
+        return false;
     }
-    if (input->connection.address.empty()) {
-        input->connection.address = address;
+    if (parsedPort == 0) {
+        return false;
     }
-    for (auto& media : input->media) {
-        if (media.transport.dataPort == 0) {
-            media.transport.dataPort = port;
-        }
-    }
+    *address = std::move(parsedAddress);
+    *port = parsedPort;
+    return true;
 }
 
 SdpNegotiationInput toNegotiationInput(
@@ -63,6 +65,37 @@ SdpNegotiationInput toNegotiationInput(
         result.media.push_back(std::move(capability));
     }
     return result;
+}
+
+StreamConfig encodedStreamConfig(
+    const EncodedPacketStreamPtr& stream) {
+    if (auto audio =
+            std::dynamic_pointer_cast<AudioEncodedStream>(stream)) {
+        return audio->config();
+    }
+    if (auto video =
+            std::dynamic_pointer_cast<VideoEncodedStream>(stream)) {
+        return video->config();
+    }
+    return {};
+}
+
+StreamId findStream(
+    const MediaControl& control,
+    MediaKind kind,
+    const std::string& mid) {
+    for (const auto id : control.streams()) {
+        const auto stream = control.stream(id);
+        if (!stream) {
+            continue;
+        }
+        const auto config = encodedStreamConfig(stream);
+        if (config.kind == kind &&
+            (config.name == mid || config.name.empty() || mid.empty())) {
+            return id;
+        }
+    }
+    return 0;
 }
 
 } // namespace
@@ -145,17 +178,20 @@ Status SDPMediaControl::createOffer(
     std::string* offerSdp) {
     std::lock_guard<std::mutex> lock(sdpMutex_);
     auto local = options.local;
-    applyLocalEndpoint(localEndpoint(), &local);
     auto result = negotiator_.createOffer(local);
     if (!result.status.ok) {
         return result.status;
     }
-    auto status = builder_.build(result.description, offerSdp);
+    auto status = createStreams(
+        result, local, options.replaceExistingStreams);
     if (!status.ok) {
         return status;
     }
-    status = createStreams(
-        result, local, options.replaceExistingStreams);
+    status = applyStreamEndpoints(&result.description, nullptr);
+    if (!status.ok) {
+        return status;
+    }
+    status = builder_.build(result.description, offerSdp);
     if (!status.ok) {
         return status;
     }
@@ -173,20 +209,19 @@ Status SDPMediaControl::createAnswer(
         return status;
     }
     auto local = options.local;
-    applyLocalEndpoint(localEndpoint(), &local);
     auto result = negotiator_.createAnswer(local, offer);
     if (!result.status.ok) {
         return result.status;
     }
-    status = builder_.build(result.description, answerSdp);
-    if (!status.ok) {
-        return status;
-    }
-    status = updateRemoteEndpoint(offer);
-    if (!status.ok) {
-        return status;
-    }
     status = createStreams(result, local, true);
+    if (!status.ok) {
+        return status;
+    }
+    status = applyStreamEndpoints(&result.description, &offer);
+    if (!status.ok) {
+        return status;
+    }
+    status = builder_.build(result.description, answerSdp);
     if (!status.ok) {
         return status;
     }
@@ -212,16 +247,15 @@ Status SDPMediaControl::applyRemoteOffer(
         return status;
     }
     auto local = localValue;
-    applyLocalEndpoint(localEndpoint(), &local);
     auto result = negotiator_.createAnswer(local, offer);
     if (!result.status.ok) {
         return result.status;
     }
-    status = updateRemoteEndpoint(offer);
+    status = createStreams(result, local, true);
     if (!status.ok) {
         return status;
     }
-    status = createStreams(result, local, true);
+    status = applyStreamEndpoints(&result.description, &offer);
     if (!status.ok) {
         return status;
     }
@@ -249,11 +283,11 @@ Status SDPMediaControl::applyRemoteAnswer(
     if (!result.status.ok) {
         return result.status;
     }
-    status = updateRemoteEndpoint(answer);
+    status = createStreams(result, local, true);
     if (!status.ok) {
         return status;
     }
-    status = createStreams(result, local, true);
+    status = applyStreamEndpoints(&result.description, &answer);
     if (!status.ok) {
         return status;
     }
@@ -269,20 +303,62 @@ Status SDPMediaControl::renegotiate(
     if (!result.status.ok) {
         return result.status;
     }
-    return createStreams(result, local, true);
+    auto status = createStreams(result, local, true);
+    if (!status.ok) {
+        return status;
+    }
+    return applyStreamEndpoints(&result.description, &remote_);
 }
 
-Status SDPMediaControl::updateRemoteEndpoint(
-    const SdpSessionDescription& remote) {
-    for (const auto& media : remote.media) {
-        if (media.transport.dataPort != 0 &&
-            !remote.connection.address.empty()) {
-            return setRemoteEndpoint(
-                remote.connection.address + ":" +
-                std::to_string(media.transport.dataPort));
+Status SDPMediaControl::applyStreamEndpoints(
+    SdpSessionDescription* local,
+    const SdpSessionDescription* remote) {
+    if (!local) {
+        return failure("local SDP description is null");
+    }
+    for (auto& media : local->media) {
+        if (media.rejected) {
+            continue;
+        }
+        const auto id = findStream(*this, media.kind, media.mid);
+        if (id == 0) {
+            return failure("SDP media has no matching stream");
+        }
+        std::string address;
+        std::uint16_t port = 0;
+        if (!parseEndpoint(localEndpoint(id), &address, &port)) {
+            return failure("stream has no usable local endpoint");
+        }
+        media.transport.dataPort = port;
+        if (local->connection.address.empty()) {
+            local->connection.address = address;
+        }
+        if (!remote) {
+            continue;
+        }
+        const auto remoteMedia = std::find_if(
+            remote->media.begin(), remote->media.end(),
+            [&](const SdpMediaDescription& candidate) {
+                return candidate.kind == media.kind &&
+                    (candidate.mid.empty() || media.mid.empty() ||
+                     candidate.mid == media.mid);
+            });
+        if (remoteMedia == remote->media.end() ||
+            remoteMedia->rejected ||
+            remoteMedia->transport.dataPort == 0) {
+            return failure("remote SDP media has no usable endpoint");
+        }
+        if (remote->connection.address.empty()) {
+            return failure("remote SDP connection address is empty");
+        }
+        const auto status = setRemoteEndpoint(
+            id, remote->connection.address + ":" +
+                std::to_string(remoteMedia->transport.dataPort));
+        if (!status.ok) {
+            return status;
         }
     }
-    return failure("remote SDP has no usable media endpoint");
+    return {};
 }
 
 SdpSessionDescription SDPMediaControl::localDescription() const {

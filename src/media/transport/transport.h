@@ -12,14 +12,10 @@ namespace iris::media::v2 {
 
 enum class TransportState {
     Closed,
+    Configured,
     Opening,
     Open,
     Failed,
-};
-
-struct TransportConfig {
-    std::string endpoint;
-    AttributeMap options;
 };
 
 struct TransportInfo {
@@ -32,6 +28,9 @@ struct TransportStats {
     std::uint64_t messagesReceived = 0;
     std::uint64_t bytesSent = 0;
     std::uint64_t bytesReceived = 0;
+    std::uint64_t rtpPacketsSent = 0;
+    std::uint64_t rtpPacketsReceived = 0;
+    std::uint64_t rtcpPacketsReceived = 0;
     std::uint64_t sendErrors = 0;
     std::uint64_t receiveErrors = 0;
     std::uint64_t droppedMessages = 0;
@@ -51,7 +50,11 @@ class ITransport {
 public:
     virtual ~ITransport() = default;
 
-    virtual Status open(const TransportConfig& config) = 0;
+    // configure() applies stable construction settings such as local bind
+    // address and port. open() adds or updates runtime settings such as the
+    // remote endpoint and stream mappings.
+    virtual Status configure(const AttributeMap& options) = 0;
+    virtual Status open(const AttributeMap& options) = 0;
     virtual void close() noexcept = 0;
 
     virtual TransportInfo info() const = 0;
@@ -66,7 +69,8 @@ protected:
 };
 
 // Transport boundary for already-encoded media. The concrete transport owns
-// framing, packetization, serialization, and reconstruction.
+// wire framing and serialization. EncodedPacket metadata and payload bytes are
+// opaque to a type-agnostic transport such as RTPTransport.
 class IEncodedPacketTransport : public ITransport {
 public:
     ~IEncodedPacketTransport() override = default;

@@ -41,7 +41,9 @@ private:
     Status createStreams(const SdpNegotiationResult& result,
                          const SdpNegotiationInput& local,
                          bool replaceExisting);
-    Status updateRemoteEndpoint(const SdpSessionDescription& remote);
+    Status applyStreamEndpoints(
+        SdpSessionDescription* local,
+        const SdpSessionDescription* remote);
 
     mutable std::mutex sdpMutex_;
     SdpBuilder builder_;

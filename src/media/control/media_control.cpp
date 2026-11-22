@@ -57,44 +57,30 @@ StreamConfig streamConfig(const EncodedPacketStreamPtr& stream) {
     return {};
 }
 
+std::string reservedStreamKey(const StreamConfig& stream) {
+    return stream.name.empty()
+        ? "stream." + std::to_string(stream.id)
+        : stream.name;
+}
+
+std::string endpointPort(const std::string& endpoint) {
+    const auto separator = endpoint.rfind(':');
+    return separator == std::string::npos
+        ? std::string{}
+        : endpoint.substr(separator + 1);
+}
+
 } // namespace
-
-void StreamMuxSink::setStream(
-    StreamId id,
-    std::weak_ptr<IEncodedPacketStream> stream) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    streams_[id] = std::move(stream);
-}
-
-void StreamMuxSink::removeStream(StreamId id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    streams_.erase(id);
-}
-
-void StreamMuxSink::onEncodedPacket(const EncodedPacket& packet) {
-    std::shared_ptr<IEncodedPacketStream> stream;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto iterator = streams_.find(packet.streamId);
-        if (iterator != streams_.end()) {
-            stream = iterator->second.lock();
-        }
-    }
-    if (stream) {
-        stream->onEncodedPacket(packet);
-    }
-}
 
 MediaControl::MediaControl() = default;
 
 MediaControl::~MediaControl() {
-    stopAll();
-    if (transport_) {
-        transport_->close();
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& entry : streams_) {
+        entry.second.stream->shutdown();
+        entry.second.transport->close();
     }
     streams_.clear();
-    mux_.reset();
-    transport_.reset();
 }
 
 Status MediaControl::initialize(const MediaControlConfig& config) {
@@ -103,34 +89,50 @@ Status MediaControl::initialize(const MediaControlConfig& config) {
         return failure("media control is already initialized");
     }
     config_ = config;
-    transport_ = std::make_shared<RTPTransport>();
-    mux_ = std::make_shared<StreamMuxSink>();
-    auto result = transport_->open(transportConfig());
-    if (!result.ok) {
-        transport_.reset();
-        mux_.reset();
-        return result;
-    }
+    reservedPorts_.clear();
     initialized_ = true;
     return {};
 }
 
-TransportConfig MediaControl::transportConfig() const {
-    TransportConfig config;
-    config.options = config_.options;
-    config.endpoint = value(config_.options, "rtp.remoteEndpoint");
+AttributeMap MediaControl::transportConfig(
+    const StreamConfig& stream,
+    const std::string& remoteEndpoint,
+    bool useConfiguredPort) const {
+    AttributeMap config = config_.options;
     const auto bindAddress =
         value(config_.options, "rtp.bindAddress");
     if (!bindAddress.empty()) {
-        config.options["bindAddress"] = bindAddress;
+        config["bindAddress"] = bindAddress;
     }
-    const auto port = value(config_.options, "rtp.port");
-    if (!port.empty()) {
-        config.options["port"] = port;
+    const auto configuredPort = value(config_.options, "rtp.port");
+    config["port"] =
+        useConfiguredPort && !configuredPort.empty()
+            ? configuredPort
+            : "0";
+    if (!remoteEndpoint.empty()) {
+        config["remoteEndpoint"] = remoteEndpoint;
     }
-    if (!config.endpoint.empty()) {
-        config.options["remoteEndpoint"] = config.endpoint;
+    const std::string prefix = "stream.";
+    for (auto iterator = config.begin(); iterator != config.end();) {
+        if (iterator->first.rfind(prefix, 0) == 0) {
+            iterator = config.erase(iterator);
+        } else {
+            ++iterator;
+        }
     }
+    const auto codec = codecType(
+        value(stream.attributes, "codecType"), stream.kind);
+    const auto streamPrefix =
+        prefix + std::to_string(stream.id) + ".";
+    config[streamPrefix + "payloadType"] = std::to_string(
+        std::clamp(
+            integer(stream.attributes, "payloadType",
+                    codec == CodecType::H264 ? 96 : 111),
+            0, 127));
+    config[streamPrefix + "clockRate"] = std::to_string(
+        std::max(1, integer(
+            stream.attributes, "clockRate",
+            codec == CodecType::H264 ? 90000 : 48000)));
     return config;
 }
 
@@ -207,15 +209,13 @@ Status MediaControl::createStream(
     if (!output) {
         return failure("stream output is null");
     }
-    EncodedPacketStreamPtr result;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_ || !transport_) {
+    if (!initialized_) {
         return failure("media control is not initialized");
     }
-    for (const auto& stream : streams_) {
-        if (stream.second->info().state == StreamState::Active) {
-            return failure(
-                "cannot add a stream while media is active");
+    for (const auto& entry : streams_) {
+        if (entry.second.stream->info().state == StreamState::Active) {
+            return failure("cannot add a stream while media is active");
         }
     }
     StreamConfig effective = configValue;
@@ -226,50 +226,55 @@ Status MediaControl::createStream(
         }
         effective.id = next;
     }
+    EncodedPacketStreamPtr stream;
     if (effective.kind == MediaKind::Audio) {
-        result = std::make_shared<AudioFrameStream>();
+        stream = std::make_shared<AudioFrameStream>();
     } else if (effective.kind == MediaKind::Video) {
-        result = std::make_shared<VideoFrameStream>();
+        stream = std::make_shared<VideoFrameStream>();
     } else {
         return failure("unsupported stream media kind");
     }
-    auto status = configureStream(effective, result);
+    auto status = configureStream(effective, stream);
     if (!status.ok) {
         return status;
     }
-    streams_[effective.id] = result;
-    const auto codec = codecType(
-        value(effective.attributes, "codecType"), effective.kind);
-    const auto payloadType = static_cast<std::uint8_t>(std::clamp(
-        integer(effective.attributes, "payloadType",
-                codec == CodecType::H264 ? 96 : 111),
-        0, 127));
-    const auto clockRate = integer(
-        effective.attributes, "clockRate",
-        codec == CodecType::H264 ? 90000 : 48000);
-    status = transport_->configureStream(
-        effective.id, effective.kind, codec, payloadType, clockRate);
-    if (!status.ok) {
-        streams_.erase(effective.id);
-        return status;
-    }
-    if (!result->attach(transport_).ok) {
-        streams_.erase(effective.id);
-        return failure("failed to attach stream transport");
-    }
-    updateMux();
-    *output = result;
-    return {};
-}
 
-void MediaControl::updateMux() {
-    if (!transport_ || !mux_) {
-        return;
+    auto transport = std::make_shared<RTPTransport>();
+    const auto configuredPort = value(config_.options, "rtp.port");
+    bool useConfiguredPort = !configuredPort.empty();
+    if (useConfiguredPort) {
+        for (const auto& entry : streams_) {
+            if (endpointPort(entry.second.transport->info().endpoint) ==
+                configuredPort) {
+                useConfiguredPort = false;
+                break;
+            }
+        }
     }
-    for (const auto& entry : streams_) {
-        mux_->setStream(entry.first, entry.second);
+    auto options =
+        transportConfig(effective, {}, useConfiguredPort);
+    const auto reservedKey = reservedStreamKey(effective);
+    const auto reserved = reservedPorts_.find(reservedKey);
+    if (reserved != reservedPorts_.end()) {
+        options["port"] = reserved->second;
     }
-    transport_->setSink(mux_);
+    status = transport->configure(options);
+    if (!status.ok) {
+        return status;
+    }
+    status = stream->attach(transport);
+    if (!status.ok) {
+        transport->close();
+        return status;
+    }
+    const auto port = endpointPort(transport->info().endpoint);
+    if (!port.empty()) {
+        reservedPorts_[reservedKey] = port;
+    }
+    streams_[effective.id] = StreamEntry{
+        std::move(stream), std::move(transport), {}};
+    *output = streams_[effective.id].stream;
+    return {};
 }
 
 bool MediaControl::destroyStream(StreamId id) {
@@ -278,10 +283,8 @@ bool MediaControl::destroyStream(StreamId id) {
     if (iterator == streams_.end()) {
         return false;
     }
-    iterator->second->shutdown();
-    if (mux_) {
-        mux_->removeStream(id);
-    }
+    iterator->second.stream->shutdown();
+    iterator->second.transport->close();
     streams_.erase(iterator);
     return true;
 }
@@ -289,7 +292,7 @@ bool MediaControl::destroyStream(StreamId id) {
 EncodedPacketStreamPtr MediaControl::stream(StreamId id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto iterator = streams_.find(id);
-    return iterator == streams_.end() ? nullptr : iterator->second;
+    return iterator == streams_.end() ? nullptr : iterator->second.stream;
 }
 
 std::vector<StreamId> MediaControl::streams() const {
@@ -307,20 +310,25 @@ Status MediaControl::startAll() {
     if (streams_.empty()) {
         return failure("media control has no streams");
     }
-    Status result;
-    for (const auto& entry : streams_) {
-        result = entry.second->start();
-        if (!result.ok) {
-            break;
+    for (auto& entry : streams_) {
+        const auto configValue = streamConfig(entry.second.stream);
+        auto status = entry.second.transport->open(transportConfig(
+            configValue, entry.second.remoteEndpoint, true));
+        if (!status.ok) {
+            return status;
+        }
+        status = entry.second.stream->start();
+        if (!status.ok) {
+            return status;
         }
     }
-    return result;
+    return {};
 }
 
 void MediaControl::stopAll() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& entry : streams_) {
-        entry.second->shutdown();
+    for (auto& entry : streams_) {
+        entry.second.stream->shutdown();
     }
 }
 
@@ -328,7 +336,7 @@ MediaStats MediaControl::stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     MediaStats result;
     for (const auto& entry : streams_) {
-        const auto streamStats = entry.second->stats();
+        const auto streamStats = entry.second.stream->stats();
         result.samplesProduced += streamStats.media.samplesProduced;
         result.samplesConsumed += streamStats.media.samplesConsumed;
         result.samplesDropped += streamStats.media.samplesDropped;
@@ -339,42 +347,61 @@ MediaStats MediaControl::stats() const {
 
 Status MediaControl::setRemoteEndpoint(const std::string& endpoint) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_ || !transport_) {
+    if (!initialized_) {
         return failure("media control is not initialized");
     }
     config_.options["rtp.remoteEndpoint"] = endpoint;
-    auto status = transport_->setRemoteEndpoint(endpoint);
-    if (!status.ok) {
-        return status;
+    for (auto& entry : streams_) {
+        entry.second.remoteEndpoint = endpoint;
     }
-    for (const auto& entry : streams_) {
-        const auto streamConfig =
-            ::iris::media::v2::streamConfig(entry.second);
-        const auto codec = codecType(
-            value(streamConfig.attributes, "codecType"),
-            streamConfig.kind);
-        (void)transport_->configureStream(
-            entry.first,
-            streamConfig.kind,
-            codec,
-            static_cast<std::uint8_t>(std::clamp(
-                integer(streamConfig.attributes, "payloadType",
-                        codec == CodecType::H264 ? 96 : 111),
-                0, 127)),
-            integer(streamConfig.attributes, "clockRate",
-                    codec == CodecType::H264 ? 90000 : 48000));
+    return {};
+}
+
+Status MediaControl::setRemoteEndpoint(
+    StreamId id,
+    const std::string& endpoint) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto iterator = streams_.find(id);
+    if (iterator == streams_.end()) {
+        return failure("stream does not exist");
     }
+    iterator->second.remoteEndpoint = endpoint;
     return {};
 }
 
 std::string MediaControl::localEndpoint() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return transport_ ? transport_->info().endpoint : std::string();
+    if (streams_.empty()) {
+        return {};
+    }
+    return streams_.begin()->second.transport->info().endpoint;
+}
+
+std::string MediaControl::localEndpoint(StreamId id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto iterator = streams_.find(id);
+    return iterator == streams_.end()
+        ? std::string{}
+        : iterator->second.transport->info().endpoint;
 }
 
 TransportStats MediaControl::transportStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return transport_ ? transport_->stats() : TransportStats{};
+    TransportStats result;
+    for (const auto& entry : streams_) {
+        const auto stats = entry.second.transport->stats();
+        result.messagesSent += stats.messagesSent;
+        result.messagesReceived += stats.messagesReceived;
+        result.bytesSent += stats.bytesSent;
+        result.bytesReceived += stats.bytesReceived;
+        result.rtpPacketsSent += stats.rtpPacketsSent;
+        result.rtpPacketsReceived += stats.rtpPacketsReceived;
+        result.rtcpPacketsReceived += stats.rtcpPacketsReceived;
+        result.sendErrors += stats.sendErrors;
+        result.receiveErrors += stats.receiveErrors;
+        result.droppedMessages += stats.droppedMessages;
+    }
+    return result;
 }
 
 } // namespace iris::media::v2

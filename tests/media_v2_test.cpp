@@ -23,7 +23,67 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 namespace {
+
+bool sendUdpDatagram(const std::string& endpoint,
+                     const std::vector<std::uint8_t>& payload) {
+    const auto separator = endpoint.rfind(':');
+    if (separator == std::string::npos || payload.empty()) {
+        return false;
+    }
+    auto host = endpoint.substr(0, separator);
+    if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+        host = host.substr(1, host.size() - 2);
+    }
+    const auto port = std::stoul(endpoint.substr(separator + 1));
+    if (port == 0 || port > 65535) {
+        return false;
+    }
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    destination.sin_port = htons(static_cast<std::uint16_t>(port));
+    if (inet_pton(
+            AF_INET, host.c_str(), &destination.sin_addr) != 1) {
+        return false;
+    }
+#ifdef _WIN32
+    const auto socketValue = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socketValue == INVALID_SOCKET) {
+        return false;
+    }
+    const auto sent = ::sendto(
+        socketValue,
+        reinterpret_cast<const char*>(payload.data()),
+        static_cast<int>(payload.size()), 0,
+        reinterpret_cast<const sockaddr*>(&destination),
+        sizeof(destination));
+    closesocket(socketValue);
+#else
+    const auto socketValue = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socketValue < 0) {
+        return false;
+    }
+    const auto sent = ::sendto(
+        socketValue, payload.data(), payload.size(), 0,
+        reinterpret_cast<const sockaddr*>(&destination),
+        sizeof(destination));
+    ::close(socketValue);
+#endif
+    return sent == static_cast<decltype(sent)>(payload.size());
+}
 
 class PacketSink final : public iris::media::v2::IEncodedPacketSink {
 public:
@@ -131,27 +191,44 @@ bool testCodec() {
 }
 
 bool testRtpTransport() {
+    {
+        iris::media::v2::RTPTransport unconfigured;
+        if (unconfigured.open(iris::media::v2::AttributeMap{}).ok) {
+            return false;
+        }
+    }
+
     iris::media::v2::RTPTransport receiver;
-    iris::media::v2::TransportConfig receiverConfig;
-    receiverConfig.options["port"] = "0";
-    receiverConfig.options["stream.2.kind"] = "audio";
-    receiverConfig.options["stream.2.codec"] = "opus";
-    receiverConfig.options["stream.2.payloadType"] = "112";
-    receiverConfig.options["stream.2.clockRate"] = "48000";
-    if (!receiver.open(receiverConfig).ok) {
+    iris::media::v2::AttributeMap receiverConfig;
+    receiverConfig["port"] = "0";
+    receiverConfig["stream.1.payloadType"] = "97";
+    receiverConfig["stream.1.clockRate"] = "90000";
+    receiverConfig["stream.2.payloadType"] = "112";
+    receiverConfig["stream.2.clockRate"] = "48000";
+    if (!receiver.configure(receiverConfig).ok ||
+        receiver.info().state !=
+            iris::media::v2::TransportState::Configured) {
         return false;
     }
     const auto receiverEndpoint = receiver.info().endpoint;
+    if (!receiver.open(iris::media::v2::AttributeMap{}).ok) {
+        return false;
+    }
 
     iris::media::v2::RTPTransport sender;
-    iris::media::v2::TransportConfig senderConfig;
-    senderConfig.options["port"] = "0";
-    senderConfig.options["remoteEndpoint"] = receiverEndpoint;
-    senderConfig.options["stream.2.kind"] = "audio";
-    senderConfig.options["stream.2.codec"] = "opus";
-    senderConfig.options["stream.2.payloadType"] = "112";
-    senderConfig.options["stream.2.clockRate"] = "48000";
-    if (!sender.open(senderConfig).ok) {
+    iris::media::v2::AttributeMap senderConfig;
+    senderConfig["port"] = "0";
+    if (!sender.configure(senderConfig).ok) {
+        return false;
+    }
+    iris::media::v2::AttributeMap senderOpenConfig;
+    senderOpenConfig["remoteEndpoint"] = receiverEndpoint;
+    senderOpenConfig["stream.1.payloadType"] = "97";
+    senderOpenConfig["stream.1.clockRate"] = "90000";
+    senderOpenConfig["stream.2.payloadType"] = "112";
+    senderOpenConfig["stream.2.clockRate"] = "48000";
+    if (!sender.open(senderOpenConfig).ok ||
+        sender.info().state != iris::media::v2::TransportState::Open) {
         return false;
     }
 
@@ -160,25 +237,44 @@ bool testRtpTransport() {
         std::shared_ptr<PacketSink>(&sink, [](PacketSink*) {});
     receiver.setSink(sinkHolder);
 
-    std::vector<std::uint8_t> payload(160, 0x5a);
-    iris::media::v2::EncodedPacket packet;
-    packet.streamId = 1;
-    packet.kind = iris::media::v2::MediaKind::Audio;
-    packet.codecType = iris::media::v2::CodecType::Opus;
-    packet.data = iris::media::v2::copyToMediaBuffer(
-        payload.data(), payload.size());
-    packet.ptsMicros = 20000;
-    if (!packet.data.buffer) {
+    // The bytes deliberately resemble an Annex-B H.264 access unit. RTP
+    // transport must forward them unchanged without inspecting the payload.
+    std::vector<std::uint8_t> opaque(
+        3000, 0x5a);
+    opaque[0] = 0;
+    opaque[1] = 0;
+    opaque[2] = 0;
+    opaque[3] = 1;
+    opaque[4] = 0x65;
+    iris::media::v2::EncodedPacket first;
+    first.streamId = 1;
+    first.kind = iris::media::v2::MediaKind::Video;
+    first.codecType = iris::media::v2::CodecType::H264;
+    first.key = true;
+    first.data = iris::media::v2::copyToMediaBuffer(
+        opaque.data(), opaque.size());
+    first.ptsMicros = 20000;
+    if (!first.data.buffer) {
         std::cerr << "packet buffer allocation failed\n";
         return false;
     }
-    const auto sent = sender.send(packet);
+    const auto sent = sender.send(first);
     if (!sent.ok) {
         std::cerr << "RTP send failed: " << sent.message << '\n';
         return false;
     }
-    auto second = packet;
+    std::vector<std::uint8_t> audio(160, 0x33);
+    iris::media::v2::EncodedPacket second;
     second.streamId = 2;
+    second.kind = iris::media::v2::MediaKind::Audio;
+    second.codecType = iris::media::v2::CodecType::Opus;
+    second.key = false;
+    second.data = iris::media::v2::copyToMediaBuffer(
+        audio.data(), audio.size());
+    second.ptsMicros = 20000;
+    if (!second.data.buffer) {
+        return false;
+    }
     if (!sender.send(second).ok || !sink.wait(2)) {
         const auto senderStats = sender.stats();
         const auto receiverStats = receiver.stats();
@@ -192,17 +288,39 @@ bool testRtpTransport() {
         return false;
     }
     const auto received = sink.packets();
-    const bool sawFirst = std::any_of(
+    const auto sawFirst = std::find_if(
         received.begin(), received.end(),
         [](const auto& value) { return value.streamId == 1; });
-    const bool sawSecond = std::any_of(
+    const auto sawSecond = std::find_if(
         received.begin(), received.end(),
         [](const auto& value) { return value.streamId == 2; });
-    const bool valid = received.size() == 2 &&
-        sawFirst && sawSecond &&
-        received[0].kind == iris::media::v2::MediaKind::Audio &&
-        received[1].kind == iris::media::v2::MediaKind::Audio &&
-        iris::media::v2::bufferViewSize(received[0].data) == payload.size();
+    auto sameBytes = [](const iris::media::v2::EncodedPacket& value,
+                        const std::vector<std::uint8_t>& expected) {
+        const auto size = iris::media::v2::bufferViewSize(value.data);
+        return size == expected.size() &&
+            std::memcmp(
+                iris::media::v2::bufferViewData(value.data),
+                expected.data(), expected.size()) == 0;
+    };
+    const auto senderStats = sender.stats();
+    const auto receiverStats = receiver.stats();
+    bool valid = received.size() == 2 &&
+        sawFirst != received.end() &&
+        sawSecond != received.end() &&
+        sawFirst->kind == iris::media::v2::MediaKind::Unknown &&
+        sawFirst->codecType == iris::media::v2::CodecType::Unknown &&
+        sawFirst->key == false &&
+        sawFirst->ptsMicros == first.ptsMicros &&
+        sameBytes(*sawFirst, opaque) &&
+        sawSecond->kind == iris::media::v2::MediaKind::Unknown &&
+        sawSecond->codecType == iris::media::v2::CodecType::Unknown &&
+        sawSecond->ptsMicros == second.ptsMicros &&
+        sameBytes(*sawSecond, audio) &&
+        senderStats.messagesSent == 2 &&
+        senderStats.rtpPacketsSent == 2 &&
+        receiverStats.messagesReceived == 2 &&
+        receiverStats.rtpPacketsReceived == 2 &&
+        receiverStats.rtcpPacketsReceived == 0;
     if (!valid) {
         std::cerr << "unexpected RTP result count=" << received.size();
         for (const auto& value : received) {
@@ -211,6 +329,30 @@ bool testRtpTransport() {
                       << iris::media::v2::bufferViewSize(value.data);
         }
         std::cerr << '\n';
+    }
+    if (!valid) {
+        return false;
+    }
+
+    // A receiver report is managed by RTPTransport and must never be emitted
+    // as an EncodedPacket.
+    const std::vector<std::uint8_t> receiverReport = {
+        0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78,
+    };
+    if (!sendUdpDatagram(receiverEndpoint, receiverReport)) {
+        std::cerr << "failed to send RTCP receiver report\n";
+        return false;
+    }
+    for (int retry = 0; retry < 100; ++retry) {
+        if (receiver.stats().rtcpPacketsReceived != 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    valid = receiver.stats().rtcpPacketsReceived == 1 &&
+        sink.packets().size() == 2;
+    if (!valid) {
+        std::cerr << "RTCP was not managed internally\n";
     }
     return valid;
 }
@@ -336,12 +478,31 @@ bool testControl() {
     if (!control.createStream(streamConfigValue, &stream).ok || !stream) {
         return false;
     }
-    if (control.streams().size() != 1 ||
+    iris::media::v2::StreamConfig videoConfigValue;
+    videoConfigValue.id = 8;
+    videoConfigValue.kind = iris::media::v2::MediaKind::Video;
+    videoConfigValue.name = "video";
+    videoConfigValue.attributes["codecType"] = "h264";
+    videoConfigValue.attributes["payloadType"] = "96";
+    videoConfigValue.attributes["clockRate"] = "90000";
+    videoConfigValue.attributes["resolution"] = "320x180";
+    iris::media::v2::EncodedPacketStreamPtr videoStream;
+    if (!control.createStream(videoConfigValue, &videoStream).ok ||
+        !videoStream) {
+        return false;
+    }
+    const auto audioEndpoint = control.localEndpoint(7);
+    const auto videoEndpoint = control.localEndpoint(8);
+    if (audioEndpoint.empty() || videoEndpoint.empty() ||
+        audioEndpoint == videoEndpoint ||
+        control.streams().size() != 2 ||
         control.stream(7) != stream ||
+        control.stream(8) != videoStream ||
         !control.startAll().ok) {
         return false;
     }
-    if (!control.destroyStream(7) || control.stream(7)) {
+    if (!control.destroyStream(7) || control.stream(7) ||
+        !control.destroyStream(8) || control.stream(8)) {
         return false;
     }
     control.stopAll();

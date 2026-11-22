@@ -4,6 +4,8 @@
 
 #include "../codec/codec_types.h"
 
+#include <mutex>
+
 namespace iris::media::v2 {
 
 // Concrete encoded-audio stream. Its transport is always an encoded-packet
@@ -14,7 +16,7 @@ public:
     ~AudioEncodedStream() override;
 
     Status configure(const StreamConfig& config) override;
-    const StreamConfig& config() const noexcept;
+    StreamConfig config() const;
     Status start() override;
     void shutdown() noexcept override;
 
@@ -26,6 +28,13 @@ public:
 
     StreamInfo info() const override;
     StreamStats stats() const override;
+
+protected:
+    mutable std::mutex mutex_;
+    StreamConfig config_;
+    StreamInfo info_;
+    StreamStats stats_;
+    std::shared_ptr<IEncodedPacketTransport> transport_;
 };
 
 struct AudioFrameStreamConfig {
@@ -49,8 +58,27 @@ public:
     Status setEncoder(std::unique_ptr<IAudioEncoder> encoder);
     Status setDecoder(std::unique_ptr<IAudioDecoder> decoder);
     Status setMuted(bool muted);
+    void setOutputSink(std::weak_ptr<IAudioFrameSink> sink);
 
+    void onEncodedPacket(const EncodedPacket& packet) override;
     void onAudioFrame(const AudioFrame& frame) override;
+
+private:
+    class DecodeSink;
+    class EncodeSink;
+
+    AudioFormat inputFormat_;
+    AudioFormat outputFormat_;
+    CodecType encoderType_ = CodecType::Unknown;
+    CodecType decoderType_ = CodecType::Unknown;
+    int bitrateKbps_ = 0;
+    AttributeMap parameters_;
+    std::shared_ptr<IAudioEncoder> encoder_;
+    std::shared_ptr<IAudioDecoder> decoder_;
+    std::shared_ptr<DecodeSink> decodeSink_;
+    std::shared_ptr<EncodeSink> encodeSink_;
+    std::weak_ptr<IAudioFrameSink> outputSink_;
+    bool muted_ = false;
 };
 
 } // namespace iris::media::v2

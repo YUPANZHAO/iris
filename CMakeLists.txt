@@ -64,7 +64,6 @@ add_library(iris STATIC
   src/media/engine/media_buffer.cpp
   src/media/sdp/sdp_components.cpp
   src/media/stream/audio_stream.cpp
-  src/media/stream/stream_internal.cpp
   src/media/stream/video_stream.cpp
   src/media/transport/rtp_transport.cpp
   src/sip/pj_account.cpp

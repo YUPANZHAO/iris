@@ -23,9 +23,12 @@ public:
     virtual StreamStats stats() const = 0;
 };
 
-// Generic stream branch for encoded media. The transport type is fixed so
-// encoded streams cannot be paired with an opaque byte transport.
-class IEncodedPacketStream : public IStream, public IEncodedPacketSink {
+// Generic stream branch for encoded media. A stream is directly the sink for
+// exactly one encoded-packet transport.
+class IEncodedPacketStream
+    : public IStream,
+      public IEncodedPacketSink,
+      public std::enable_shared_from_this<IEncodedPacketStream> {
 public:
     ~IEncodedPacketStream() override = default;
 

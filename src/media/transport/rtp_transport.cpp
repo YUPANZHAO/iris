@@ -20,13 +20,11 @@ using NativeSocket = int;
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -37,9 +35,10 @@ using NativeSocket = int;
 namespace iris::media::v2 {
 namespace {
 
-constexpr std::uint8_t kDefaultOpusPayloadType = 111;
-constexpr std::uint8_t kDefaultH264PayloadType = 96;
-constexpr int kDefaultMtu = 1200;
+constexpr std::uint8_t kDefaultPayloadType = 96;
+constexpr int kDefaultClockRate = 90000;
+constexpr std::size_t kRtpHeaderSize = 12;
+constexpr std::size_t kMaximumDatagramSize = 65507;
 
 struct EndpointParts {
     std::string host;
@@ -72,6 +71,26 @@ std::optional<EndpointParts> parseEndpoint(const std::string& value) {
     }
 }
 
+bool parseRemoteEndpoint(const std::string& value,
+                         sockaddr_in* result) {
+    if (!result) {
+        return false;
+    }
+    const auto endpoint = parseEndpoint(value);
+    if (!endpoint) {
+        return false;
+    }
+    sockaddr_in parsed{};
+    parsed.sin_family = AF_INET;
+    parsed.sin_port = htons(endpoint->port);
+    if (inet_pton(
+            AF_INET, endpoint->host.c_str(), &parsed.sin_addr) != 1) {
+        return false;
+    }
+    *result = parsed;
+    return true;
+}
+
 std::string option(const AttributeMap& values,
                    const std::string& key,
                    const std::string& fallback = {}) {
@@ -91,50 +110,6 @@ int intOption(const AttributeMap& values,
     } catch (...) {
         return fallback;
     }
-}
-
-bool equalsIgnoreCase(const std::string& value,
-                      const std::string& expected) {
-    if (value.size() != expected.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        if (std::tolower(static_cast<unsigned char>(value[index])) !=
-            std::tolower(static_cast<unsigned char>(expected[index]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-MediaKind parseKind(const std::string& value) {
-    if (equalsIgnoreCase(value, "video")) {
-        return MediaKind::Video;
-    }
-    if (equalsIgnoreCase(value, "audio")) {
-        return MediaKind::Audio;
-    }
-    return MediaKind::Unknown;
-}
-
-CodecType parseCodec(const std::string& value) {
-    if (equalsIgnoreCase(value, "opus")) {
-        return CodecType::Opus;
-    }
-    if (equalsIgnoreCase(value, "h264")) {
-        return CodecType::H264;
-    }
-    return CodecType::Unknown;
-}
-
-std::uint8_t defaultPayloadType(CodecType codec) noexcept {
-    return codec == CodecType::H264
-        ? kDefaultH264PayloadType
-        : kDefaultOpusPayloadType;
-}
-
-int defaultClockRate(CodecType codec) noexcept {
-    return codec == CodecType::H264 ? 90000 : 48000;
 }
 
 std::int64_t rtpTimeToMicros(std::uint32_t timestamp,
@@ -201,14 +176,18 @@ struct ParsedRtp {
     std::size_t payloadSize = 0;
 };
 
+struct ParsedRtcp {
+    std::uint32_t packetCount = 0;
+};
+
 bool parseRtp(const std::uint8_t* data,
               std::size_t size,
               ParsedRtp* result) {
-    if (!data || size < 12 || (data[0] >> 6) != 2) {
+    if (!data || size < kRtpHeaderSize || (data[0] >> 6) != 2) {
         return false;
     }
     const std::size_t csrcCount = data[0] & 0x0f;
-    std::size_t offset = 12 + csrcCount * 4;
+    std::size_t offset = kRtpHeaderSize + csrcCount * 4;
     if (offset > size) {
         return false;
     }
@@ -251,138 +230,47 @@ bool parseRtp(const std::uint8_t* data,
     return true;
 }
 
-struct H264NalView {
-    const std::uint8_t* data = nullptr;
-    std::size_t size = 0;
-};
-
-void appendH264StartCode(std::vector<std::uint8_t>& output) {
-    output.insert(output.end(), {0, 0, 0, 1});
-}
-
-std::vector<H264NalView> splitH264Nals(const std::uint8_t* data,
-                                       std::size_t size) {
-    std::vector<H264NalView> result;
-    std::vector<std::size_t> starts;
-    if (!data || size == 0) {
-        return result;
+bool parseRtcp(const std::uint8_t* data,
+               std::size_t size,
+               ParsedRtcp* result) {
+    if (!data || size < 4 || (data[0] >> 6) != 2) {
+        return false;
     }
-    for (std::size_t index = 0; index + 3 <= size; ++index) {
-        if (index + 4 <= size &&
-            data[index] == 0 && data[index + 1] == 0 &&
-            data[index + 2] == 0 && data[index + 3] == 1) {
-            starts.push_back(index + 4);
-            index += 3;
-        } else if (data[index] == 0 && data[index + 1] == 0 &&
-                   data[index + 2] == 1) {
-            starts.push_back(index + 3);
-            index += 2;
-        }
-    }
-    if (starts.empty()) {
-        result.push_back({data, size});
-        return result;
-    }
-    for (std::size_t index = 0; index < starts.size(); ++index) {
-        const auto begin = starts[index];
-        auto end = index + 1 < starts.size()
-            ? starts[index + 1] - 3
-            : size;
-        while (end > begin && data[end - 1] == 0) {
-            --end;
-        }
-        if (end > begin) {
-            result.push_back({data + begin, end - begin});
-        }
-    }
-    return result;
-}
-
-bool containsH264Nal(const std::vector<H264NalView>& nals,
-                     std::uint8_t type) {
-    return std::any_of(
-        nals.begin(), nals.end(), [type](const H264NalView& nal) {
-            return nal.size > 0 && (nal.data[0] & 0x1f) == type;
-        });
-}
-
-struct H264ReceiveState {
-    std::vector<std::uint8_t> accessUnit;
-    std::optional<std::uint32_t> timestamp;
-    std::optional<std::uint16_t> expectedSequence;
-    bool fragmentOpen = false;
-    bool damaged = false;
-
-    void reset() {
-        accessUnit.clear();
-        timestamp.reset();
-        expectedSequence.reset();
-        fragmentOpen = false;
-        damaged = false;
-    }
-
-    bool appendAggregation(const std::uint8_t* payload,
-                           std::size_t size) {
-        std::size_t offset = 1;
-        while (offset + 2 <= size) {
-            const auto length =
-                (static_cast<std::size_t>(payload[offset]) << 8) |
-                payload[offset + 1];
-            offset += 2;
-            if (length == 0 || length > size - offset) {
-                return false;
-            }
-            const auto type = payload[offset] & 0x1f;
-            if (type == 0 || type > 23) {
-                return false;
-            }
-            appendH264StartCode(accessUnit);
-            accessUnit.insert(
-                accessUnit.end(), payload + offset,
-                payload + offset + length);
-            offset += length;
-        }
-        return offset > 1 && offset == size;
-    }
-
-    bool appendFragment(const std::uint8_t* payload,
-                        std::size_t size) {
-        if (size < 2) {
+    std::size_t offset = 0;
+    ParsedRtcp parsed;
+    while (offset < size) {
+        if (size - offset < 4 || (data[offset] >> 6) != 2) {
             return false;
         }
-        const auto header = payload[1];
-        const auto type = header & 0x1f;
-        const bool start = (header & 0x80) != 0;
-        const bool end = (header & 0x40) != 0;
-        if (type == 0 || type > 23) {
+        const auto packetType = data[offset + 1];
+        if (packetType < 192 || packetType > 223) {
             return false;
         }
-        if (start) {
-            if (end || fragmentOpen) {
-                return false;
-            }
-            appendH264StartCode(accessUnit);
-            accessUnit.push_back(
-                static_cast<std::uint8_t>((payload[0] & 0xe0) | type));
-        } else if (!fragmentOpen) {
+        const auto lengthWords =
+            (static_cast<std::size_t>(data[offset + 2]) << 8) |
+            data[offset + 3];
+        const auto packetSize = (lengthWords + 1) * 4;
+        if (packetSize < 4 || packetSize > size - offset) {
             return false;
         }
-        accessUnit.insert(accessUnit.end(), payload + 2, payload + size);
-        fragmentOpen = !end;
-        return true;
+        offset += packetSize;
+        parsed.packetCount += 1;
     }
-};
+    if (offset != size || parsed.packetCount == 0) {
+        return false;
+    }
+    if (result) {
+        *result = parsed;
+    }
+    return true;
+}
 
 struct RtpStreamRuntime {
     StreamId id = 0;
-    MediaKind kind = MediaKind::Unknown;
-    CodecType codec = CodecType::Unknown;
     std::uint8_t payloadType = 0;
     int clockRate = 0;
     std::uint16_t sequenceNumber = 0;
     std::uint32_t ssrc = 0;
-    std::vector<std::uint8_t> parameterSets;
-    H264ReceiveState h264;
 };
 
 } // namespace
@@ -396,65 +284,37 @@ struct RTPTransportState {
     NativeSocket socket = invalidSocket();
     sockaddr_in remote{};
     bool remoteConfigured = false;
-    TransportConfig config;
+    AttributeMap configOptions;
     TransportInfo currentInfo;
     TransportStats currentStats;
-    std::weak_ptr<ITransportSink> rawSink;
     std::weak_ptr<IEncodedPacketSink> packetSink;
     std::map<StreamId, RtpStreamRuntime> streams;
     std::map<std::uint8_t, StreamId> streamsByPayloadType;
-    int mtu = kDefaultMtu;
 
     ~RTPTransportState() {
         close();
     }
 
-    RtpStreamRuntime& ensureStream(StreamId id,
-                                   MediaKind kind,
-                                   CodecType codec) {
+    RtpStreamRuntime& ensureStream(StreamId id) {
         auto iterator = streams.find(id);
         if (iterator != streams.end()) {
-            if (codec != CodecType::Unknown) {
-                iterator->second.codec = codec;
-            }
-            if (kind != MediaKind::Unknown) {
-                iterator->second.kind = kind;
-            }
             return iterator->second;
         }
-        const auto effectiveCodec =
-            codec == CodecType::Unknown ? CodecType::Opus : codec;
         RtpStreamRuntime state;
         state.id = id == 0 ? 1 : id;
-        state.codec = effectiveCodec;
-        state.kind = kind == MediaKind::Unknown
-            ? (effectiveCodec == CodecType::H264
-                   ? MediaKind::Video
-                   : MediaKind::Audio)
-            : kind;
-        state.payloadType = defaultPayloadType(effectiveCodec);
-        state.clockRate = defaultClockRate(effectiveCodec);
+        state.payloadType = kDefaultPayloadType;
+        state.clockRate = kDefaultClockRate;
         static std::atomic<std::uint32_t> nextSsrc{0x51000000};
         state.ssrc = nextSsrc.fetch_add(1, std::memory_order_relaxed);
 
         const auto prefix = "stream." + std::to_string(state.id) + ".";
         state.payloadType = static_cast<std::uint8_t>(std::clamp(
-            intOption(config.options, prefix + "payloadType",
+            intOption(configOptions, prefix + "payloadType",
                       state.payloadType),
             0, 127));
         state.clockRate = std::max(
-            1, intOption(config.options, prefix + "clockRate",
+            1, intOption(configOptions, prefix + "clockRate",
                          state.clockRate));
-        const auto configuredKind =
-            parseKind(option(config.options, prefix + "kind"));
-        if (configuredKind != MediaKind::Unknown) {
-            state.kind = configuredKind;
-        }
-        const auto configuredCodec =
-            parseCodec(option(config.options, prefix + "codec"));
-        if (configuredCodec != CodecType::Unknown) {
-            state.codec = configuredCodec;
-        }
         streamsByPayloadType[state.payloadType] = state.id;
         return streams.emplace(state.id, std::move(state)).first->second;
     }
@@ -465,10 +325,10 @@ struct RTPTransportState {
                    const std::uint8_t* payload,
                    std::size_t payloadSize) {
         if (!payload || payloadSize == 0 ||
-            payloadSize > 65535 - 12) {
+            payloadSize > kMaximumDatagramSize - kRtpHeaderSize) {
             return Status{false, 1, "invalid RTP payload"};
         }
-        std::vector<std::uint8_t> packet(12 + payloadSize);
+        std::vector<std::uint8_t> packet(kRtpHeaderSize + payloadSize);
         packet[0] = 0x80;
         packet[1] = static_cast<std::uint8_t>(
             (marker ? 0x80 : 0) | stream.payloadType);
@@ -485,136 +345,70 @@ struct RTPTransportState {
         packet[10] = static_cast<std::uint8_t>(stream.ssrc >> 8);
         packet[11] = static_cast<std::uint8_t>(stream.ssrc);
         std::memcpy(
-            packet.data() + 12, payload, payloadSize);
+            packet.data() + kRtpHeaderSize, payload, payloadSize);
         stream.sequenceNumber =
             static_cast<std::uint16_t>(stream.sequenceNumber + 1);
         auto buffer = copyToMediaBuffer(packet.data(), packet.size());
         if (!buffer.buffer) {
             return Status{false, 1, "failed to allocate RTP datagram"};
         }
-        return rawSend(std::move(buffer));
+        auto result = rawSend(std::move(buffer));
+        if (result.ok) {
+            std::lock_guard<std::mutex> lock(mutex);
+            currentStats.rtpPacketsSent += 1;
+        }
+        return result;
     }
 
-    Status packetizeH264(RtpStreamRuntime& stream,
-                         std::uint32_t timestamp,
-                         const std::uint8_t* data,
-                         std::size_t size,
-                         bool key) {
-        auto nals = splitH264Nals(data, size);
-        if (nals.empty()) {
-            return Status{false, 1, "H.264 access unit has no NAL units"};
-        }
-
-        std::vector<std::uint8_t> currentParameters;
-        for (const auto& nal : nals) {
-            const auto type = nal.size > 0 ? nal.data[0] & 0x1f : 0;
-            if (type == 7 || type == 8) {
-                appendH264StartCode(currentParameters);
-                currentParameters.insert(
-                    currentParameters.end(), nal.data, nal.data + nal.size);
-            }
-        }
-        if (!currentParameters.empty()) {
-            stream.parameterSets = currentParameters;
-        }
-
-        std::vector<H264NalView> toSend;
-        if (key && !containsH264Nal(nals, 7) &&
-            !stream.parameterSets.empty()) {
-            toSend = splitH264Nals(
-                stream.parameterSets.data(), stream.parameterSets.size());
-        }
-        toSend.insert(toSend.end(), nals.begin(), nals.end());
-        for (std::size_t nalIndex = 0;
-             nalIndex < toSend.size();
-             ++nalIndex) {
-            const auto nal = toSend[nalIndex];
-            const bool finalNal = nalIndex + 1 == toSend.size();
-            const auto maximum = std::max<std::size_t>(3, mtu);
-            if (nal.size <= maximum) {
-                auto result = emitRtp(
-                    stream, timestamp, finalNal,
-                    nal.data, nal.size);
-                if (!result.ok) {
-                    return result;
-                }
+    void applyStreamOptionsLocked() {
+        streamsByPayloadType.clear();
+        std::unordered_set<StreamId> configuredStreams;
+        const std::string prefix = "stream.";
+        for (const auto& entry : configOptions) {
+            if (entry.first.rfind(prefix, 0) != 0) {
                 continue;
             }
-            const auto indicator = static_cast<std::uint8_t>(
-                (nal.data[0] & 0xe0) | 28);
-            std::size_t offset = 1;
-            bool first = true;
-            while (offset < nal.size) {
-                const auto fragmentSize =
-                    std::min(maximum - 2, nal.size - offset);
-                std::vector<std::uint8_t> payload(fragmentSize + 2);
-                payload[0] = indicator;
-                payload[1] = static_cast<std::uint8_t>(
-                    (first ? 0x80 : 0) |
-                    (offset + fragmentSize >= nal.size ? 0x40 : 0) |
-                    (nal.data[0] & 0x1f));
-                std::memcpy(
-                    payload.data() + 2,
-                    nal.data + offset,
-                    fragmentSize);
-                const auto last =
-                    offset + fragmentSize >= nal.size;
-                auto result = emitRtp(
-                    stream, timestamp,
-                    finalNal && last,
-                    payload.data(), payload.size());
-                if (!result.ok) {
-                    return result;
-                }
-                first = false;
-                offset += fragmentSize;
+            const auto separator = entry.first.find(
+                '.', prefix.size());
+            if (separator == std::string::npos) {
+                continue;
+            }
+            try {
+                configuredStreams.insert(
+                    static_cast<StreamId>(std::stoull(
+                        entry.first.substr(
+                            prefix.size(),
+                            separator - prefix.size()))));
+            } catch (...) {
             }
         }
-        return {};
-    }
-
-    Status configureStream(StreamId streamId,
-                           MediaKind kind,
-                           CodecType codec,
-                           std::uint8_t payloadType,
-                           int clockRate) {
-        std::lock_guard<std::mutex> lock(streamMutex);
-        auto& stream = ensureStream(streamId, kind, codec);
-        for (auto iterator = streamsByPayloadType.begin();
-             iterator != streamsByPayloadType.end();) {
-            if (iterator->second == streamId) {
-                iterator = streamsByPayloadType.erase(iterator);
+        for (auto iterator = streams.begin();
+             iterator != streams.end();) {
+            if (configuredStreams.find(iterator->first) ==
+                configuredStreams.end()) {
+                iterator = streams.erase(iterator);
             } else {
                 ++iterator;
             }
         }
-        stream.kind = kind;
-        stream.codec = codec;
-        stream.payloadType = payloadType;
-        stream.clockRate = std::max(1, clockRate);
-        streamsByPayloadType[payloadType] = streamId;
-        return {};
+        for (const auto id : configuredStreams) {
+            auto& stream = ensureStream(id);
+            const auto streamPrefix =
+                "stream." + std::to_string(stream.id) + ".";
+            stream.payloadType = static_cast<std::uint8_t>(std::clamp(
+                intOption(configOptions,
+                          streamPrefix + "payloadType",
+                          stream.payloadType),
+                0, 127));
+            stream.clockRate = std::max(
+                1, intOption(configOptions,
+                             streamPrefix + "clockRate",
+                             stream.clockRate));
+            streamsByPayloadType[stream.payloadType] = stream.id;
+        }
     }
 
-    Status setRemoteEndpoint(const std::string& endpointValue) {
-        const auto endpoint = parseEndpoint(endpointValue);
-        if (!endpoint) {
-            return Status{false, 1, "invalid RTP remote endpoint"};
-        }
-        sockaddr_in value{};
-        value.sin_family = AF_INET;
-        value.sin_port = htons(endpoint->port);
-        if (inet_pton(
-                AF_INET, endpoint->host.c_str(), &value.sin_addr) != 1) {
-            return Status{false, 1, "invalid RTP remote address"};
-        }
-        std::lock_guard<std::mutex> lock(mutex);
-        remote = value;
-        remoteConfigured = true;
-        return {};
-    }
-
-    Status open(const TransportConfig& value) {
+    Status configure(const AttributeMap& options) {
         close();
 #ifdef _WIN32
         static const bool winsockReady = [] {
@@ -625,57 +419,22 @@ struct RTPTransportState {
             return Status{false, 1, "failed to initialize Winsock"};
         }
 #endif
-        std::lock_guard<std::mutex> lock(mutex);
-        if (value.options.find("listen") != value.options.end() &&
-            value.options.at("listen") == "false") {
+        std::scoped_lock lock(streamMutex, mutex);
+        if (options.find("listen") != options.end() &&
+            options.at("listen") == "false") {
             return Status{false, 1, "RTP transport requires a listen socket"};
         }
-        config = value;
+        configOptions = options;
         streams.clear();
         streamsByPayloadType.clear();
-        mtu = std::max(256, intOption(value.options, "mtu", kDefaultMtu));
-        std::unordered_set<StreamId> configuredStreams;
-        const std::string prefix = "stream.";
-        for (const auto& entry : config.options) {
-            if (entry.first.rfind(prefix, 0) != 0) {
-                continue;
-            }
-            const auto separator = entry.first.find(
-                '.', prefix.size());
-            if (separator == std::string::npos) {
-                continue;
-            }
-            try {
-                const auto id = static_cast<StreamId>(std::stoull(
-                    entry.first.substr(
-                        prefix.size(),
-                        separator - prefix.size())));
-                configuredStreams.insert(id);
-            } catch (...) {
-            }
-        }
-        for (const auto id : configuredStreams) {
-            (void)ensureStream(id, MediaKind::Unknown, CodecType::Unknown);
-        }
-
-        auto remoteValue = option(value.options, "remoteEndpoint", value.endpoint);
-        if (!remoteValue.empty()) {
-            const auto endpoint = parseEndpoint(remoteValue);
-            if (!endpoint) {
-                return Status{false, 1, "invalid RTP remote endpoint"};
-            }
-            remote = {};
-            remote.sin_family = AF_INET;
-            remote.sin_port = htons(endpoint->port);
-            if (inet_pton(AF_INET, endpoint->host.c_str(), &remote.sin_addr) != 1) {
-                return Status{false, 1, "invalid RTP remote address"};
-            }
-            remoteConfigured = true;
-        }
+        remote = {};
+        remoteConfigured = false;
+        currentInfo = {};
+        currentStats = {};
 
         const auto bindAddress =
-            option(value.options, "bindAddress", "0.0.0.0");
-        const auto port = intOption(value.options, "port", 0);
+            option(options, "bindAddress", "0.0.0.0");
+        const auto port = intOption(options, "port", 0);
         socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (!validSocket(socket)) {
             return Status{false, 1, "failed to create RTP socket: " +
@@ -726,10 +485,40 @@ struct RTPTransportState {
         if (advertised == "0.0.0.0") {
             advertised = "127.0.0.1";
         }
-        currentInfo.state = TransportState::Open;
+        currentInfo.state = TransportState::Configured;
         currentInfo.endpoint =
             advertised + ":" +
             std::to_string(ntohs(bound.sin_port));
+        return {};
+    }
+
+    Status open(const AttributeMap& options) {
+        std::scoped_lock lock(streamMutex, mutex);
+        if (!validSocket(socket) ||
+            (currentInfo.state != TransportState::Configured &&
+             currentInfo.state != TransportState::Open)) {
+            return Status{false, 1, "RTP transport is not configured"};
+        }
+        auto nextOptions = configOptions;
+        for (const auto& entry : options) {
+            nextOptions[entry.first] = entry.second;
+        }
+        sockaddr_in nextRemote{};
+        const auto remoteValue =
+            option(nextOptions, "remoteEndpoint");
+        const bool nextRemoteConfigured = !remoteValue.empty();
+        if (nextRemoteConfigured &&
+            !parseRemoteEndpoint(remoteValue, &nextRemote)) {
+            return Status{false, 1, "invalid RTP remote endpoint"};
+        }
+        configOptions = std::move(nextOptions);
+        remote = nextRemote;
+        remoteConfigured = nextRemoteConfigured;
+        applyStreamOptionsLocked();
+        if (currentInfo.state == TransportState::Open) {
+            return {};
+        }
+        currentInfo.state = TransportState::Open;
         running.store(true, std::memory_order_release);
         receiveThread = std::thread([this] { receiveLoop(); });
         return {};
@@ -740,7 +529,6 @@ struct RTPTransportState {
             std::lock_guard<std::mutex> lock(mutex);
             running.store(false, std::memory_order_release);
             currentInfo.state = TransportState::Closed;
-            rawSink.reset();
             packetSink.reset();
         }
         {
@@ -831,18 +619,13 @@ struct RTPTransportState {
             currentStats.messagesReceived += 1;
             currentStats.bytesReceived += size;
         }
-        auto raw = copyToMediaBuffer(data, size);
-        if (raw.buffer) {
-            auto sink = [&] {
-                std::lock_guard<std::mutex> lock(mutex);
-                return rawSink.lock();
-            }();
-            if (sink) {
-                sink->onTransportData(std::move(raw));
-            }
-        }
         if (size >= 2 && data[1] >= 192 && data[1] <= 223) {
-            return;
+            ParsedRtcp rtcp;
+            if (parseRtcp(data, size, &rtcp)) {
+                std::lock_guard<std::mutex> lock(mutex);
+                currentStats.rtcpPacketsReceived += rtcp.packetCount;
+                return;
+            }
         }
         ParsedRtp rtp;
         if (!parseRtp(data, size, &rtp) || !rtp.payload ||
@@ -852,7 +635,6 @@ struct RTPTransportState {
             return;
         }
         EncodedPacket packet;
-        std::optional<StreamId> completedStream;
         {
             std::lock_guard<std::mutex> lock(streamMutex);
             auto binding = streamsByPayloadType.find(rtp.payloadType);
@@ -864,78 +646,28 @@ struct RTPTransportState {
                 }
             }
             if (!state) {
-                const auto codec = rtp.payloadType == kDefaultH264PayloadType
-                    ? CodecType::H264
-                    : CodecType::Opus;
-                state = &ensureStream(1, MediaKind::Unknown, codec);
+                StreamId id = 1;
+                while (streams.find(id) != streams.end()) {
+                    ++id;
+                }
+                state = &ensureStream(id);
                 state->payloadType = rtp.payloadType;
                 streamsByPayloadType[rtp.payloadType] = state->id;
             }
-            if (!state || state->codec != CodecType::H264) {
-                packet.streamId = state ? state->id : 1;
-                packet.kind = state ? state->kind : MediaKind::Audio;
-                packet.codecType =
-                    state ? state->codec : CodecType::Opus;
-                packet.data = copyToMediaBuffer(rtp.payload, rtp.payloadSize);
-                packet.ptsMicros = rtpTimeToMicros(
-                    rtp.timestamp, state ? state->clockRate : 48000);
-                packet.key = true;
-                completedStream = packet.streamId;
-            } else {
-                auto& h264 = state->h264;
-                if (h264.timestamp && *h264.timestamp != rtp.timestamp) {
-                    h264.reset();
-                }
-                if (h264.expectedSequence &&
-                    *h264.expectedSequence != rtp.sequence) {
-                    h264.damaged = true;
-                }
-                h264.expectedSequence =
-                    static_cast<std::uint16_t>(rtp.sequence + 1);
-                h264.timestamp = rtp.timestamp;
-                if (!h264.damaged) {
-                    const auto nalType = rtp.payload[0] & 0x1f;
-                    if (nalType == 28) {
-                        h264.damaged = !h264.appendFragment(
-                            rtp.payload, rtp.payloadSize);
-                    } else if (h264.fragmentOpen) {
-                        h264.damaged = true;
-                    } else if (nalType == 24) {
-                        h264.damaged = !h264.appendAggregation(
-                            rtp.payload, rtp.payloadSize);
-                    } else if (nalType >= 1 && nalType <= 23) {
-                        appendH264StartCode(h264.accessUnit);
-                        h264.accessUnit.insert(
-                            h264.accessUnit.end(), rtp.payload,
-                            rtp.payload + rtp.payloadSize);
-                    } else {
-                        h264.damaged = true;
-                    }
-                }
-                if (rtp.marker) {
-                    if (!h264.damaged && !h264.fragmentOpen &&
-                        !h264.accessUnit.empty()) {
-                        packet.streamId = state->id;
-                        packet.kind = MediaKind::Video;
-                        packet.codecType = CodecType::H264;
-                        packet.data = copyToMediaBuffer(
-                            h264.accessUnit.data(), h264.accessUnit.size());
-                        packet.ptsMicros = rtpTimeToMicros(
-                            rtp.timestamp, state->clockRate);
-                        const auto nals = splitH264Nals(
-                            h264.accessUnit.data(), h264.accessUnit.size());
-                        packet.key = containsH264Nal(nals, 5);
-                        completedStream = packet.streamId;
-                    }
-                    h264.accessUnit.clear();
-                    h264.fragmentOpen = false;
-                    h264.damaged = false;
-                    h264.expectedSequence.reset();
-                }
-            }
+            packet.streamId = state->id;
+            packet.data = copyToMediaBuffer(
+                rtp.payload, rtp.payloadSize);
+            packet.ptsMicros = rtpTimeToMicros(
+                rtp.timestamp, state->clockRate);
         }
-        if (!completedStream || !packet.data.buffer) {
+        if (!packet.data.buffer) {
+            std::lock_guard<std::mutex> lock(mutex);
+            currentStats.droppedMessages += 1;
             return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            currentStats.rtpPacketsReceived += 1;
         }
         auto sink = [&] {
             std::lock_guard<std::mutex> lock(mutex);
@@ -978,9 +710,15 @@ RTPTransport::~RTPTransport() {
     }
 }
 
-Status RTPTransport::open(const TransportConfig& config) {
+Status RTPTransport::configure(const AttributeMap& options) {
     auto state = stateFor(this);
-    return state ? state->open(config)
+    return state ? state->configure(options)
+                 : Status{false, 1, "RTP transport state is unavailable"};
+}
+
+Status RTPTransport::open(const AttributeMap& options) {
+    auto state = stateFor(this);
+    return state ? state->open(options)
                  : Status{false, 1, "RTP transport state is unavailable"};
 }
 
@@ -1001,20 +739,11 @@ Status RTPTransport::send(const EncodedPacket& packet) {
         return Status{false, 1, "empty encoded packet"};
     }
     std::lock_guard<std::mutex> lock(state->streamMutex);
-    auto& stream = state->ensureStream(
-        packet.streamId, packet.kind, packet.codecType);
+    auto& stream = state->ensureStream(packet.streamId);
     const auto timestamp = microsToRtpTime(
         packet.ptsMicros, stream.clockRate);
-    if (stream.codec == CodecType::H264) {
-        return state->packetizeH264(
-            stream, timestamp, data, size, packet.key);
-    }
-    if (stream.codec == CodecType::Opus) {
-        auto result = state->emitRtp(
-            stream, timestamp, true, data, size);
-        return result;
-    }
-    return Status{false, 1, "unsupported encoded codec"};
+    return state->emitRtp(
+        stream, timestamp, true, data, size);
 }
 
 void RTPTransport::setSink(
@@ -1025,25 +754,6 @@ void RTPTransport::setSink(
     }
 }
 
-Status RTPTransport::configureStream(StreamId streamId,
-                                     MediaKind kind,
-                                     CodecType codec,
-                                     std::uint8_t payloadType,
-                                     int clockRate) {
-    auto state = stateFor(this);
-    return state
-        ? state->configureStream(
-              streamId, kind, codec, payloadType, clockRate)
-        : Status{false, 1, "RTP transport state is unavailable"};
-}
-
-Status RTPTransport::setRemoteEndpoint(
-    const std::string& endpoint) {
-    auto state = stateFor(this);
-    return state ? state->setRemoteEndpoint(endpoint)
-                 : Status{false, 1, "RTP transport state is unavailable"};
-}
-
 Status RTPTransport::send(MediaBufferView data) {
     auto state = stateFor(this);
     return state ? state->rawSend(std::move(data))
@@ -1051,10 +761,7 @@ Status RTPTransport::send(MediaBufferView data) {
 }
 
 void RTPTransport::setSink(std::weak_ptr<ITransportSink> sink) {
-    if (auto state = stateFor(this)) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->rawSink = std::move(sink);
-    }
+    (void)sink;
 }
 
 TransportInfo RTPTransport::info() const {

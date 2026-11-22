@@ -1,17 +1,11 @@
 #include "media/stream/audio_stream.h"
 
 #include "media/codec/ffmpeg_codec_factory.h"
-#include "media/engine/media_buffer.h"
-#include "media/stream/stream_internal.h"
 
-#include <mutex>
 #include <utility>
 
 namespace iris::media::v2 {
 namespace {
-
-using stream_internal::EncodedStreamState;
-using stream_internal::AudioFrameState;
 
 CodecType codecFromAttributes(const AttributeMap& values) {
     const auto iterator = values.find("codecType");
@@ -27,104 +21,98 @@ CodecType codecFromAttributes(const AttributeMap& values) {
     return CodecType::Unknown;
 }
 
-class AudioDecodeSink final : public IAudioFrameSink {
+} // namespace
+
+class AudioFrameStream::EncodeSink final : public IEncodedPacketSink {
 public:
-    AudioDecodeSink(std::weak_ptr<EncodedStreamState> encoded,
-                    std::weak_ptr<AudioFrameState> frame)
-        : encoded_(std::move(encoded)), frame_(std::move(frame)) {
+    explicit EncodeSink(std::weak_ptr<AudioFrameStream> stream)
+        : stream_(std::move(stream)) {
     }
 
-    void onAudioFrame(const AudioFrame& frameValue) override {
-        if (auto encoded = encoded_.lock()) {
-            std::lock_guard<std::mutex> lock(encoded->mutex);
-            encoded->stats.media.samplesProduced += 1;
-        }
-        if (auto frame = frame_.lock()) {
-            std::shared_ptr<IAudioFrameSink> output;
-            {
-                std::lock_guard<std::mutex> lock(frame->mutex);
-                output = frame->outputSink.lock();
-            }
-            if (output) {
-                output->onAudioFrame(frameValue);
-            }
+    void onEncodedPacket(const EncodedPacket& packet) override {
+        if (auto stream = stream_.lock()) {
+            (void)stream->sendEncodedPacket(packet);
         }
     }
 
 private:
-    std::weak_ptr<EncodedStreamState> encoded_;
-    std::weak_ptr<AudioFrameState> frame_;
+    std::weak_ptr<AudioFrameStream> stream_;
 };
 
-} // namespace
+class AudioFrameStream::DecodeSink final : public IAudioFrameSink {
+public:
+    explicit DecodeSink(std::weak_ptr<AudioFrameStream> stream)
+        : stream_(std::move(stream)) {
+    }
+
+    void onAudioFrame(const AudioFrame& frame) override {
+        auto stream = stream_.lock();
+        if (!stream) {
+            return;
+        }
+        std::shared_ptr<IAudioFrameSink> output;
+        {
+            std::lock_guard<std::mutex> lock(stream->mutex_);
+            stream->stats_.media.samplesProduced += 1;
+            output = stream->outputSink_.lock();
+        }
+        if (output) {
+            output->onAudioFrame(frame);
+        }
+    }
+
+private:
+    std::weak_ptr<AudioFrameStream> stream_;
+};
 
 AudioEncodedStream::AudioEncodedStream() {
-    auto state = std::make_shared<EncodedStreamState>();
-    state->config.kind = MediaKind::Audio;
-    state->config.direction = MediaDirection::SendRecv;
-    state->info.state = StreamState::Idle;
-    state->send = [this](const EncodedPacket& packet) {
-        return sendEncodedPacket(packet);
-    };
-    stream_internal::registerEncodedStream(this, std::move(state));
+    config_.kind = MediaKind::Audio;
+    config_.direction = MediaDirection::SendRecv;
+    info_.state = StreamState::Idle;
 }
 
 AudioEncodedStream::~AudioEncodedStream() {
     shutdown();
-    if (auto state = stream_internal::encodedStreamState(this)) {
-        state->send = {};
-        state->receive = {};
-    }
-    stream_internal::unregisterEncodedStream(this);
 }
 
 Status AudioEncodedStream::configure(const StreamConfig& value) {
-    auto state = stream_internal::encodedStreamState(this);
-    if (!state) {
-        return {false, 1, "audio stream state is unavailable"};
-    }
     if (value.kind != MediaKind::Unknown &&
         value.kind != MediaKind::Audio) {
         return {false, 1, "audio stream requires audio media kind"};
     }
-    std::lock_guard<std::mutex> lock(state->mutex);
-    state->config = value;
-    state->config.kind = MediaKind::Audio;
-    state->info.state = StreamState::Idle;
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_ = value;
+    config_.kind = MediaKind::Audio;
+    info_.state = StreamState::Idle;
     return {};
 }
 
-const StreamConfig& AudioEncodedStream::config() const noexcept {
-    if (auto state = stream_internal::encodedStreamState(this)) {
-        return state->config;
-    }
-    static const StreamConfig empty{};
-    return empty;
+StreamConfig AudioEncodedStream::config() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_;
 }
 
 Status AudioEncodedStream::start() {
-    auto state = stream_internal::encodedStreamState(this);
-    if (!state) {
-        return {false, 1, "audio stream state is unavailable"};
+    std::shared_ptr<IEncodedPacketTransport> transport;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!transport_) {
+            info_.state = StreamState::Failed;
+            return {false, 1, "audio stream has no attached transport"};
+        }
+        transport = transport_;
     }
-    std::lock_guard<std::mutex> lock(state->mutex);
-    if (!state->transport) {
-        state->info.state = StreamState::Failed;
-        return {false, 1, "audio stream has no attached transport"};
-    }
-    state->info.transport = state->transport->info();
-    state->info.state = StreamState::Active;
+    const auto transportInfo = transport->info();
+    std::lock_guard<std::mutex> lock(mutex_);
+    info_.transport = transportInfo;
+    info_.state = StreamState::Active;
     return {};
 }
 
 void AudioEncodedStream::shutdown() noexcept {
-    auto state = stream_internal::encodedStreamState(this);
-    if (!state) {
-        return;
-    }
     detach();
-    std::lock_guard<std::mutex> lock(state->mutex);
-    state->info.state = StreamState::Stopped;
+    std::lock_guard<std::mutex> lock(mutex_);
+    info_.state = StreamState::Stopped;
 }
 
 Status AudioEncodedStream::attach(
@@ -132,35 +120,28 @@ Status AudioEncodedStream::attach(
     if (!transport) {
         return {false, 1, "audio stream transport is null"};
     }
-    auto state = stream_internal::encodedStreamState(this);
-    auto bridge = stream_internal::encodedSinkBridge(this);
-    if (!state || !bridge) {
-        return {false, 1, "audio stream state is unavailable"};
+    const auto self = weak_from_this();
+    if (self.expired()) {
+        return {false, 1, "audio stream is not owned by a shared pointer"};
     }
-    std::shared_ptr<IEncodedPacketTransport> previous;
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        previous = state->transport;
-        state->transport = transport;
-        state->info.transport = transport->info();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (transport_ && transport_ != transport) {
+            return {false, 1, "audio stream already has a transport"};
+        }
+        transport_ = transport;
+        info_.transport = transport->info();
     }
-    if (previous && previous != transport) {
-        previous->setSink(std::weak_ptr<IEncodedPacketSink>{});
-    }
-    transport->setSink(bridge);
+    transport->setSink(std::weak_ptr<IEncodedPacketSink>{self});
     return {};
 }
 
 void AudioEncodedStream::detach() noexcept {
-    auto state = stream_internal::encodedStreamState(this);
-    if (!state) {
-        return;
-    }
     std::shared_ptr<IEncodedPacketTransport> transport;
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        transport = std::move(state->transport);
-        state->info.transport = {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        transport = std::move(transport_);
+        info_.transport = {};
     }
     if (transport) {
         transport->setSink(std::weak_ptr<IEncodedPacketSink>{});
@@ -168,21 +149,17 @@ void AudioEncodedStream::detach() noexcept {
 }
 
 Status AudioEncodedStream::sendEncodedPacket(const EncodedPacket& packet) {
-    auto state = stream_internal::encodedStreamState(this);
-    if (!state) {
-        return {false, 1, "audio stream state is unavailable"};
-    }
     std::shared_ptr<IEncodedPacketTransport> transport;
     StreamId streamId = 0;
     CodecType fallbackCodec = CodecType::Unknown;
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        transport = state->transport;
-        streamId = state->config.id;
-        fallbackCodec = codecFromAttributes(state->config.attributes);
-        if (state->info.state != StreamState::Active) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (info_.state != StreamState::Active) {
             return {false, 1, "audio stream is not active"};
         }
+        transport = transport_;
+        streamId = config_.id;
+        fallbackCodec = codecFromAttributes(config_.attributes);
     }
     if (!transport) {
         return {false, 1, "audio stream has no transport"};
@@ -193,88 +170,54 @@ Status AudioEncodedStream::sendEncodedPacket(const EncodedPacket& packet) {
     if (value.codecType == CodecType::Unknown) {
         value.codecType = fallbackCodec;
     }
-    auto result = transport->send(value);
+    const auto result = transport->send(value);
     if (!result.ok) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->stats.media.codecErrors += 1;
+        std::lock_guard<std::mutex> lock(mutex_);
+        stats_.media.codecErrors += 1;
     }
     return result;
 }
 
-void AudioEncodedStream::onEncodedPacket(const EncodedPacket& packet) {
-    auto state = stream_internal::encodedStreamState(this);
-    if (!state) {
-        return;
-    }
-    std::function<void(const EncodedPacket&)> receive;
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        receive = state->receive;
-    }
-    if (receive) {
-        receive(packet);
-    }
+void AudioEncodedStream::onEncodedPacket(const EncodedPacket&) {
 }
 
 StreamInfo AudioEncodedStream::info() const {
-    if (auto state = stream_internal::encodedStreamState(this)) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        auto result = state->info;
-        if (state->transport) {
-            result.transport = state->transport->info();
-        }
-        return result;
+    std::shared_ptr<IEncodedPacketTransport> transport;
+    StreamInfo result;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result = info_;
+        transport = transport_;
     }
-    return {};
+    if (transport) {
+        result.transport = transport->info();
+    }
+    return result;
 }
 
 StreamStats AudioEncodedStream::stats() const {
-    if (auto state = stream_internal::encodedStreamState(this)) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        auto result = state->stats;
-        if (state->transport) {
-            result.transport = state->transport->stats();
-        }
-        return result;
+    std::shared_ptr<IEncodedPacketTransport> transport;
+    StreamStats result;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result = stats_;
+        transport = transport_;
     }
-    return {};
+    if (transport) {
+        result.transport = transport->stats();
+    }
+    return result;
 }
 
-AudioFrameStream::AudioFrameStream() {
-    auto state = std::make_shared<AudioFrameState>();
-    auto encoded = stream_internal::encodedStreamState(this);
-    state->decodeSink = std::make_shared<AudioDecodeSink>(encoded, state);
-    stream_internal::registerAudioFrameState(this, state);
-    if (encoded) {
-        std::lock_guard<std::mutex> lock(encoded->mutex);
-        encoded->receive = [this](const EncodedPacket& packet) {
-            if (auto frame = stream_internal::audioFrameState(this)) {
-                std::shared_ptr<IAudioDecoder> decoder;
-                {
-                    std::lock_guard<std::mutex> frameLock(frame->mutex);
-                    decoder = frame->decoder;
-                }
-                if (decoder) {
-                    (void)decoder->decode(packet);
-                }
-            }
-        };
-    }
-}
+AudioFrameStream::AudioFrameStream() = default;
 
 AudioFrameStream::~AudioFrameStream() {
-    if (auto encoded = stream_internal::encodedStreamState(this)) {
-        std::lock_guard<std::mutex> lock(encoded->mutex);
-        encoded->receive = {};
-    }
-    auto state = stream_internal::audioFrameState(this);
-    if (state) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->encoder.reset();
-        state->decoder.reset();
-        state->decodeSink.reset();
-    }
-    stream_internal::unregisterAudioFrameState(this);
+    shutdown();
+    std::lock_guard<std::mutex> lock(mutex_);
+    encoder_.reset();
+    decoder_.reset();
+    decodeSink_.reset();
+    encodeSink_.reset();
 }
 
 Status AudioFrameStream::configureAudio(
@@ -283,27 +226,22 @@ Status AudioFrameStream::configureAudio(
     if (!result.ok) {
         return result;
     }
-    auto state = stream_internal::audioFrameState(this);
-    if (!state) {
-        return {false, 1, "audio frame stream state is unavailable"};
-    }
     CodecType encoderType = CodecType::Unknown;
     CodecType decoderType = CodecType::Unknown;
-    FFmpegCodecFactory codecFactory;
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->inputFormat = configValue.inputFormat;
-        state->outputFormat = configValue.outputFormat;
-        state->encoderType = configValue.encoderType;
-        state->decoderType = configValue.decoderType;
-        state->bitrateKbps = configValue.bitrateKbps;
-        state->parameters = configValue.codecParameters;
-        encoderType = state->encoderType;
-        decoderType = state->decoderType;
+        std::lock_guard<std::mutex> lock(mutex_);
+        inputFormat_ = configValue.inputFormat;
+        outputFormat_ = configValue.outputFormat;
+        encoderType_ = configValue.encoderType;
+        decoderType_ = configValue.decoderType;
+        bitrateKbps_ = configValue.bitrateKbps;
+        parameters_ = configValue.codecParameters;
+        encoderType = encoderType_;
+        decoderType = decoderType_;
     }
+    FFmpegCodecFactory codecFactory;
     if (encoderType != CodecType::Unknown) {
-        auto encoder =
-            codecFactory.createAudioEncoder(encoderType);
+        auto encoder = codecFactory.createAudioEncoder(encoderType);
         if (!encoder) {
             return {false, 1, "requested audio encoder is unavailable"};
         }
@@ -313,8 +251,7 @@ Status AudioFrameStream::configureAudio(
         }
     }
     if (decoderType != CodecType::Unknown) {
-        auto decoder =
-            codecFactory.createAudioDecoder(decoderType);
+        auto decoder = codecFactory.createAudioDecoder(decoderType);
         if (!decoder) {
             return {false, 1, "requested audio decoder is unavailable"};
         }
@@ -328,77 +265,116 @@ Status AudioFrameStream::configureAudio(
 
 Status AudioFrameStream::setEncoder(
     std::unique_ptr<IAudioEncoder> encoder) {
-    auto frame = stream_internal::audioFrameState(this);
-    if (!frame || !encoder) {
+    if (!encoder) {
         return {false, 1, "invalid audio encoder"};
     }
-    encoder->setSink(stream_internal::encodedSendBridge(this));
+    auto owner = shared_from_this();
+    if (!owner) {
+        return {false, 1, "audio stream is not owned by a shared pointer"};
+    }
+    const std::weak_ptr<AudioFrameStream> self =
+        std::static_pointer_cast<AudioFrameStream>(std::move(owner));
+    auto sharedEncoder =
+        std::shared_ptr<IAudioEncoder>(std::move(encoder));
+    std::shared_ptr<EncodeSink> encodeSink;
     AudioEncoderConfig config;
     {
-        std::lock_guard<std::mutex> lock(frame->mutex);
-        config.codecType = frame->encoderType;
-        config.inputFormat = frame->inputFormat;
-        config.bitrateKbps = frame->bitrateKbps;
-        config.parameters = frame->parameters;
-        frame->encoder = std::move(encoder);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!encodeSink_) {
+            encodeSink_ = std::make_shared<EncodeSink>(self);
+        }
+        encodeSink = encodeSink_;
+        config.codecType = encoderType_;
+        config.inputFormat = inputFormat_;
+        config.bitrateKbps = bitrateKbps_;
+        config.parameters = parameters_;
     }
-    return frame->encoder->configure(config);
+    sharedEncoder->setSink(encodeSink);
+    const auto result = sharedEncoder->configure(config);
+    if (!result.ok) {
+        return result;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    encoder_ = std::move(sharedEncoder);
+    return {};
 }
 
 Status AudioFrameStream::setDecoder(
     std::unique_ptr<IAudioDecoder> decoder) {
-    auto frame = stream_internal::audioFrameState(this);
-    if (!frame || !decoder) {
+    if (!decoder) {
         return {false, 1, "invalid audio decoder"};
     }
-    decoder->setSink(frame->decodeSink);
+    auto owner = shared_from_this();
+    if (!owner) {
+        return {false, 1, "audio stream is not owned by a shared pointer"};
+    }
+    const std::weak_ptr<AudioFrameStream> self =
+        std::static_pointer_cast<AudioFrameStream>(std::move(owner));
+    auto sharedDecoder =
+        std::shared_ptr<IAudioDecoder>(std::move(decoder));
+    std::shared_ptr<DecodeSink> decodeSink;
     AudioDecoderConfig config;
     {
-        std::lock_guard<std::mutex> lock(frame->mutex);
-        config.codecType = frame->decoderType;
-        config.outputFormat = frame->outputFormat;
-        config.parameters = frame->parameters;
-        frame->decoder = std::shared_ptr<IAudioDecoder>(
-            std::move(decoder));
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!decodeSink_) {
+            decodeSink_ = std::make_shared<DecodeSink>(self);
+        }
+        decodeSink = decodeSink_;
+        config.codecType = decoderType_;
+        config.outputFormat = outputFormat_;
+        config.parameters = parameters_;
     }
-    return frame->decoder->configure(config);
-}
-
-Status AudioFrameStream::setMuted(bool muted) {
-    auto state = stream_internal::audioFrameState(this);
-    if (!state) {
-        return {false, 1, "audio frame stream state is unavailable"};
+    sharedDecoder->setSink(decodeSink);
+    const auto result = sharedDecoder->configure(config);
+    if (!result.ok) {
+        return result;
     }
-    std::lock_guard<std::mutex> lock(state->mutex);
-    state->muted = muted;
+    std::lock_guard<std::mutex> lock(mutex_);
+    decoder_ = std::move(sharedDecoder);
     return {};
 }
 
-void AudioFrameStream::onAudioFrame(const AudioFrame& frameValue) {
-    auto state = stream_internal::audioFrameState(this);
-    if (!state) {
-        return;
+Status AudioFrameStream::setMuted(bool muted) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    muted_ = muted;
+    return {};
+}
+
+void AudioFrameStream::setOutputSink(
+    std::weak_ptr<IAudioFrameSink> sink) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    outputSink_ = std::move(sink);
+}
+
+void AudioFrameStream::onEncodedPacket(const EncodedPacket& packet) {
+    std::shared_ptr<IAudioDecoder> decoder;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        decoder = decoder_;
     }
-    std::lock_guard<std::mutex> lock(state->mutex);
-    if (state->muted) {
-        return;
+    if (decoder) {
+        (void)decoder->decode(packet);
     }
-    auto encoded = stream_internal::encodedStreamState(this);
-    if (!state->encoder) {
-        if (encoded) {
-            std::lock_guard<std::mutex> encodedLock(encoded->mutex);
-            encoded->stats.media.codecErrors += 1;
+}
+
+void AudioFrameStream::onAudioFrame(const AudioFrame& frame) {
+    std::shared_ptr<IAudioEncoder> encoder;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (muted_) {
+            return;
         }
-        return;
+        if (!encoder_) {
+            stats_.media.codecErrors += 1;
+            return;
+        }
+        stats_.media.samplesConsumed += 1;
+        encoder = encoder_;
     }
-    if (encoded) {
-        std::lock_guard<std::mutex> encodedLock(encoded->mutex);
-        encoded->stats.media.samplesConsumed += 1;
-    }
-    const auto result = state->encoder->encode(frameValue);
-    if (!result.ok && encoded) {
-        std::lock_guard<std::mutex> encodedLock(encoded->mutex);
-        encoded->stats.media.codecErrors += 1;
+    const auto result = encoder->encode(frame);
+    if (!result.ok) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stats_.media.codecErrors += 1;
     }
 }
 
