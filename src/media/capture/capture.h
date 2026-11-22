@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../media_types.h"
+#include "../codec/codec_types.h"
 
 #include <memory>
 #include <string>
@@ -33,6 +34,14 @@ struct CaptureConfig {
     AttributeMap options;
 };
 
+struct AudioCaptureConfig {
+    AudioFormat format;
+};
+
+struct VideoCaptureConfig {
+    VideoFormat format;
+};
+
 class ICaptureObserver {
 public:
     virtual ~ICaptureObserver() = default;
@@ -58,6 +67,25 @@ public:
 
     virtual CaptureSourceInfo info() const = 0;
     virtual CaptureState state() const noexcept = 0;
+};
+
+// Audio output is derived from the generic capture lifecycle.
+class IAudioCaptureSource : public ICaptureSource {
+public:
+    ~IAudioCaptureSource() override = default;
+
+    virtual Status configure(const AudioCaptureConfig& config) = 0;
+    virtual void setAudioSink(
+        std::weak_ptr<IAudioFrameSink> sink) = 0;
+};
+
+class IVideoCaptureSource : public ICaptureSource {
+public:
+    ~IVideoCaptureSource() override = default;
+
+    virtual Status configure(const VideoCaptureConfig& config) = 0;
+    virtual void setVideoSink(
+        std::weak_ptr<IVideoFrameSink> sink) = 0;
 };
 
 class ICaptureProvider {

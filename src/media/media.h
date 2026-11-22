@@ -2,9 +2,7 @@
 
 #include "media_types.h"
 
-#include "capture/audio_capture.h"
 #include "capture/capture.h"
-#include "capture/video_capture.h"
 
 #include "codec/codec_types.h"
 

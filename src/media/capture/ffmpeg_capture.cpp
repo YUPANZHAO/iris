@@ -1,8 +1,6 @@
 #include "media/capture/ffmpeg_capture.h"
 
 #include "media/engine/media_buffer.h"
-#include "media/capture/audio_capture.h"
-#include "media/capture/video_capture.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -375,7 +373,6 @@ class AudioCapture final : public IAudioCaptureSource {
 public:
     explicit AudioCapture(CaptureConfig config)
         : genericConfig_(std::move(config)) {
-        typedConfig_.capture = genericConfig_;
         typedConfig_.format = AudioFormat{
             48000, 2, AudioSampleFormat::Signed16};
     }
@@ -390,8 +387,6 @@ public:
             return failure("audio capture must be closed before configuration");
         }
         typedConfig_ = config;
-        genericConfig_ = config.capture;
-        genericConfig_.kind = MediaKind::Audio;
         return {};
     }
 
@@ -402,7 +397,6 @@ public:
         }
         genericConfig_ = config;
         genericConfig_.kind = MediaKind::Audio;
-        typedConfig_.capture = genericConfig_;
         auto resolution = resolveSource(
             MediaKind::Audio, genericConfig_.source);
         if (!resolution.ok()) {

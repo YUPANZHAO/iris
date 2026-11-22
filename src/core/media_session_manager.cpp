@@ -1,8 +1,6 @@
 #include "core/media_session_manager.h"
 
 #include "media/capture/ffmpeg_capture.h"
-#include "media/capture/audio_capture.h"
-#include "media/capture/video_capture.h"
 #include "media/control/media_control_impl.h"
 #include "media/control/sdp_media_control.h"
 #include "media/engine/media_buffer.h"
@@ -391,7 +389,6 @@ struct MediaSessionManager::Impl {
                     "capture provider returned a non-audio source");
             }
             mv::AudioCaptureConfig typed;
-            typed.capture = config;
             typed.format.sampleRate =
                 session.config.audioFormat.sampleRate;
             typed.format.channels = session.config.audioFormat.channels;
