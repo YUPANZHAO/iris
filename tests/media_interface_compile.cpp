@@ -1,5 +1,7 @@
 #include "media/capture/ffmpeg_capture.h"
-#include "media/codec/ffmpeg_codec_impl.h"
+#include "media/codec/ffmpeg_codec_factory.h"
+#include "media/codec/ffmpeg_h264_codec.h"
+#include "media/codec/ffmpeg_opus_codec.h"
 #include "media/control/media_control_impl.h"
 #include "media/media.h"
 #include "media/sdp/sdp_components.h"
@@ -15,7 +17,10 @@ static_assert(std::is_abstract_v<
 static_assert(std::is_abstract_v<iris::media::v2::ICaptureSource>);
 static_assert(std::is_abstract_v<iris::media::v2::IAudioEncoder>);
 static_assert(std::is_abstract_v<iris::media::v2::IVideoEncoder>);
+static_assert(std::is_abstract_v<iris::media::v2::ICodecFactory>);
 static_assert(std::is_abstract_v<iris::media::v2::IMediaControl>);
+static_assert(!std::is_abstract_v<
+              iris::media::v2::FFmpegCodecFactory>);
 static_assert(!std::is_abstract_v<iris::media::v2::RTPTransport>);
 static_assert(!std::is_abstract_v<
               iris::media::v2::AudioEncodedStream>);

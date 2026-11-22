@@ -56,7 +56,9 @@ add_library(iris STATIC
   src/core/task_dispatcher.cpp
   src/media/capture/ffmpeg_capture.cpp
   src/media/capture/device_query.cpp
-  src/media/codec/ffmpeg_codec_impl.cpp
+  src/media/codec/ffmpeg_codec_factory.cpp
+  src/media/codec/ffmpeg_h264_codec.cpp
+  src/media/codec/ffmpeg_opus_codec.cpp
   src/media/control/media_control.cpp
   src/media/control/sdp_media_control.cpp
   src/media/engine/media_buffer.cpp

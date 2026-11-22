@@ -9,7 +9,7 @@
 | --- | --- |
 | shared types | `media_types.h`, `media.h` |
 | engine | optional service interfaces; `engine/media_buffer.{h,cpp}` |
-| codec | `codec/codec_types.h`, `codec/ffmpeg_codec_impl.{h,cpp}` |
+| codec | `codec/codec_types.h`, `codec/ffmpeg_codec_factory.{h,cpp}`, `codec/ffmpeg_{opus,h264}_codec.{h,cpp}` |
 | capture | `capture/capture.h`, `capture/ffmpeg_capture.{h,cpp}`, `capture/device_query.cpp` |
 | transport | `transport/transport.h`, `transport/rtp_transport.h`, `transport/rtp_transport.cpp` |
 | stream | `stream/stream*.h`, `stream/{audio,video}_stream.*`, internal `stream_internal.*` |

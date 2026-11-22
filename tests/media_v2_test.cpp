@@ -1,4 +1,6 @@
-#include "media/codec/ffmpeg_codec_impl.h"
+#include "media/codec/ffmpeg_codec_factory.h"
+#include "media/codec/ffmpeg_h264_codec.h"
+#include "media/codec/ffmpeg_opus_codec.h"
 #include "media/control/media_control.h"
 #include "media/control/media_control_impl.h"
 #include "media/control/sdp_media_control.h"
@@ -86,7 +88,7 @@ bool testCodec() {
 
     const auto encodedSinkHolder =
         std::shared_ptr<EncodedSink>(&encodedSink, [](EncodedSink*) {});
-    iris::media::v2::OpusAudioEncoder encoder;
+    iris::media::v2::FFmpegOpusAudioEncoder encoder;
     encoder.setSink(encodedSinkHolder);
     iris::media::v2::AudioEncoderConfig encoderConfig;
     encoderConfig.codecType = iris::media::v2::CodecType::Opus;
@@ -115,7 +117,7 @@ bool testCodec() {
     AudioSink decoded;
     const auto decodedHolder =
         std::shared_ptr<AudioSink>(&decoded, [](AudioSink*) {});
-    iris::media::v2::OpusAudioDecoder decoder;
+    iris::media::v2::FFmpegOpusAudioDecoder decoder;
     decoder.setSink(decodedHolder);
     iris::media::v2::AudioDecoderConfig decoderConfig;
     decoderConfig.codecType = iris::media::v2::CodecType::Opus;
@@ -226,7 +228,7 @@ bool testVideoCodec() {
     const auto encodedHolder =
         std::shared_ptr<EncodedSink>(&encodedSink, [](EncodedSink*) {});
 
-    iris::media::v2::H264VideoEncoder encoder;
+    iris::media::v2::FFmpegH264VideoEncoder encoder;
     encoder.setSink(encodedHolder);
     iris::media::v2::VideoEncoderConfig config;
     config.codecType = iris::media::v2::CodecType::H264;
@@ -257,7 +259,7 @@ bool testVideoCodec() {
     VideoSink decoded;
     const auto decodedHolder =
         std::shared_ptr<VideoSink>(&decoded, [](VideoSink*) {});
-    iris::media::v2::H264VideoDecoder decoder;
+    iris::media::v2::FFmpegH264VideoDecoder decoder;
     decoder.setSink(decodedHolder);
     iris::media::v2::VideoDecoderConfig decoderConfig;
     decoderConfig.codecType = iris::media::v2::CodecType::H264;

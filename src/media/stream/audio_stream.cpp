@@ -1,6 +1,6 @@
 #include "media/stream/audio_stream.h"
 
-#include "media/codec/ffmpeg_codec_impl.h"
+#include "media/codec/ffmpeg_codec_factory.h"
 #include "media/engine/media_buffer.h"
 #include "media/stream/stream_internal.h"
 
@@ -289,6 +289,7 @@ Status AudioFrameStream::configureAudio(
     }
     CodecType encoderType = CodecType::Unknown;
     CodecType decoderType = CodecType::Unknown;
+    FFmpegCodecFactory codecFactory;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->inputFormat = configValue.inputFormat;
@@ -301,7 +302,8 @@ Status AudioFrameStream::configureAudio(
         decoderType = state->decoderType;
     }
     if (encoderType != CodecType::Unknown) {
-        auto encoder = createAudioEncoder(encoderType);
+        auto encoder =
+            codecFactory.createAudioEncoder(encoderType);
         if (!encoder) {
             return {false, 1, "requested audio encoder is unavailable"};
         }
@@ -311,7 +313,8 @@ Status AudioFrameStream::configureAudio(
         }
     }
     if (decoderType != CodecType::Unknown) {
-        auto decoder = createAudioDecoder(decoderType);
+        auto decoder =
+            codecFactory.createAudioDecoder(decoderType);
         if (!decoder) {
             return {false, 1, "requested audio decoder is unavailable"};
         }

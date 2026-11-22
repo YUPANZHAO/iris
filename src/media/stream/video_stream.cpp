@@ -1,6 +1,6 @@
 #include "media/stream/video_stream.h"
 
-#include "media/codec/ffmpeg_codec_impl.h"
+#include "media/codec/ffmpeg_codec_factory.h"
 #include "media/stream/stream_internal.h"
 
 #include <mutex>
@@ -289,6 +289,7 @@ Status VideoFrameStream::configureVideo(
     }
     CodecType encoderType = CodecType::Unknown;
     CodecType decoderType = CodecType::Unknown;
+    FFmpegCodecFactory codecFactory;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->inputFormat = configValue.inputFormat;
@@ -301,7 +302,8 @@ Status VideoFrameStream::configureVideo(
         decoderType = state->decoderType;
     }
     if (encoderType != CodecType::Unknown) {
-        auto encoder = createVideoEncoder(encoderType);
+        auto encoder =
+            codecFactory.createVideoEncoder(encoderType);
         if (!encoder) {
             return {false, 1, "requested video encoder is unavailable"};
         }
@@ -311,7 +313,8 @@ Status VideoFrameStream::configureVideo(
         }
     }
     if (decoderType != CodecType::Unknown) {
-        auto decoder = createVideoDecoder(decoderType);
+        auto decoder =
+            codecFactory.createVideoDecoder(decoderType);
         if (!decoder) {
             return {false, 1, "requested video decoder is unavailable"};
         }

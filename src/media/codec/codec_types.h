@@ -160,4 +160,18 @@ public:
     virtual void reset() noexcept = 0;
 };
 
+class ICodecFactory {
+public:
+    virtual ~ICodecFactory() = default;
+
+    virtual std::unique_ptr<IAudioEncoder> createAudioEncoder(
+        CodecType type) = 0;
+    virtual std::unique_ptr<IAudioDecoder> createAudioDecoder(
+        CodecType type) = 0;
+    virtual std::unique_ptr<IVideoEncoder> createVideoEncoder(
+        CodecType type) = 0;
+    virtual std::unique_ptr<IVideoDecoder> createVideoDecoder(
+        CodecType type) = 0;
+};
+
 } // namespace iris::media::v2
