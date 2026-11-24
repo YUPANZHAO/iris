@@ -12,6 +12,11 @@ option(IRIS_BUILD_TESTS "Build iris tests" ON)
 option(IRIS_WITH_MEDIA "Build the independent FFmpeg media plane" ON)
 option(IRIS_BUILD_UI_BRIDGE "Build the NSH C ABI bridge" ON)
 
+if(NOT DEFINED IRIS_MEDIA_BUILD_TESTS)
+  set(IRIS_MEDIA_BUILD_TESTS ${IRIS_BUILD_TESTS})
+endif()
+add_subdirectory(iris-media)
+
 # pjproject has first-class CMake targets in the pinned fork. Keep its sample
 # applications and tests out of the application build.
 set(PJ_WITH_CXX ON CACHE BOOL "" FORCE)

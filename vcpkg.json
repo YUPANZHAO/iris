@@ -18,6 +18,7 @@
     "nlohmann-json",
     "openssl",
     "opus",
-    "openh264"
+    "openh264",
+    "boost-container"
   ]
 }
