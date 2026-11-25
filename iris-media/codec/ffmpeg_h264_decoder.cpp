@@ -20,10 +20,6 @@ extern "C" {
 namespace iris::media::codec {
 namespace {
 
-Status failure(std::string message) {
-    return Status{false, 1, std::move(message)};
-}
-
 std::string ffmpegError(int error) {
     char message[AV_ERROR_MAX_STRING_SIZE]{};
     if (av_strerror(error, message, sizeof(message)) < 0) {
@@ -78,21 +74,21 @@ struct FFmpegH264Decoder::Impl {
     Status configure(const VideoDecoderConfig& config) {
         resetCodec();
         if (config.codecType != CodecType::H264) {
-            return failure("H.264 decoder requires H.264 configuration");
+            return Status::failure("H.264 decoder requires H.264 configuration");
         }
         const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_H264);
         if (!codec) {
-            return failure("H.264 decoder is unavailable");
+            return Status::failure("H.264 decoder is unavailable");
         }
         decoder = avcodec_alloc_context3(codec);
         if (!decoder) {
-            return failure("failed to allocate H.264 decoder");
+            return Status::failure("failed to allocate H.264 decoder");
         }
         decoder->thread_count = 1;
         const auto result = avcodec_open2(decoder, codec, nullptr);
         if (result < 0) {
             resetCodec();
-            return failure(
+            return Status::failure(
                 "failed to open H.264 decoder: " +
                 ffmpegError(result));
         }
@@ -107,31 +103,31 @@ struct FFmpegH264Decoder::Impl {
 
     Status decode(const EncodedPacket& value) {
         if (!decoder) {
-            return failure("H.264 decoder is not configured");
+            return Status::failure("H.264 decoder is not configured");
         }
         if (value.kind != MediaKind::Video ||
             value.codecType != CodecType::H264) {
-            return failure("H.264 decoder requires an H.264 video packet");
+            return Status::failure("H.264 decoder requires an H.264 video packet");
         }
         if (!value.data) {
-            return failure("H.264 decoder received an empty buffer");
+            return Status::failure("H.264 decoder received an empty buffer");
         }
         streamId = value.streamId;
         const auto* data =
             static_cast<const std::uint8_t*>(value.data->data());
         const auto size = value.data->size();
         if (!data || size == 0 || size > INT_MAX) {
-            return failure("invalid H.264 packet");
+            return Status::failure("invalid H.264 packet");
         }
 
         AVPacket* input = av_packet_alloc();
         if (!input) {
-            return failure("failed to allocate H.264 input packet");
+            return Status::failure("failed to allocate H.264 input packet");
         }
         const auto alloc = av_new_packet(input, static_cast<int>(size));
         if (alloc < 0) {
             av_packet_free(&input);
-            return failure("failed to allocate H.264 packet payload");
+            return Status::failure("failed to allocate H.264 packet payload");
         }
         std::memcpy(input->data, data, size);
         input->pts = value.ptsMicros;
@@ -145,13 +141,13 @@ struct FFmpegH264Decoder::Impl {
             }
             AVPacket* retry = av_packet_alloc();
             if (!retry) {
-                return failure("failed to allocate H.264 retry packet");
+                return Status::failure("failed to allocate H.264 retry packet");
             }
             const auto retryAlloc =
                 av_new_packet(retry, static_cast<int>(size));
             if (retryAlloc < 0) {
                 av_packet_free(&retry);
-                return failure(
+                return Status::failure(
                     "failed to allocate H.264 retry payload");
             }
             std::memcpy(retry->data, data, size);
@@ -161,7 +157,7 @@ struct FFmpegH264Decoder::Impl {
         }
         if (result < 0 && result != AVERROR_EOF) {
             errors.fetch_add(1);
-            return failure(
+            return Status::failure(
                 "failed to submit H.264 packet: " +
                 ffmpegError(result));
         }
@@ -174,7 +170,7 @@ struct FFmpegH264Decoder::Impl {
         }
         const auto result = avcodec_send_packet(decoder, nullptr);
         if (result < 0 && result != AVERROR_EOF) {
-            return failure(
+            return Status::failure(
                 "failed to flush H.264 decoder: " +
                 ffmpegError(result));
         }
@@ -184,7 +180,7 @@ struct FFmpegH264Decoder::Impl {
     Status drain(std::int64_t fallbackPts) {
         AVFrame* decoded = av_frame_alloc();
         if (!decoded) {
-            return failure("failed to allocate H.264 output frame");
+            return Status::failure("failed to allocate H.264 output frame");
         }
         while (true) {
             const auto result = avcodec_receive_frame(decoder, decoded);
@@ -195,7 +191,7 @@ struct FFmpegH264Decoder::Impl {
             if (result < 0) {
                 av_frame_free(&decoded);
                 errors.fetch_add(1);
-                return failure(
+                return Status::failure(
                     "failed to decode H.264 packet: " +
                     ffmpegError(result));
             }

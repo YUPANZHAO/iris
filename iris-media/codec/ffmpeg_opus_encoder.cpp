@@ -18,10 +18,6 @@ extern "C" {
 namespace iris::media::codec {
 namespace {
 
-Status failure(std::string message) {
-    return Status{false, 1, std::move(message)};
-}
-
 std::string ffmpegError(int error) {
     char message[AV_ERROR_MAX_STRING_SIZE]{};
     if (av_strerror(error, message, sizeof(message)) < 0) {
@@ -60,24 +56,24 @@ struct FFmpegOpusEncoder::Impl {
     Status configure(const AudioEncoderConfig& config) {
         reset();
         if (config.codecType != CodecType::Opus) {
-            return failure("Opus encoder requires Opus configuration");
+            return Status::failure("Opus encoder requires Opus configuration");
         }
         const auto& format = config.inputFormat;
         if (format.sampleRate <= 0 || format.channels <= 0 ||
             format.sampleFormat != AudioSampleFormat::Signed16) {
-            return failure(
+            return Status::failure(
                 "Opus encoder requires positive signed-16 audio format");
         }
         const AVCodec* codec = avcodec_find_encoder_by_name("libopus");
         if (!codec) {
-            return failure("libopus encoder is unavailable");
+            return Status::failure("libopus encoder is unavailable");
         }
         context = avcodec_alloc_context3(codec);
         frame = av_frame_alloc();
         packet = av_packet_alloc();
         if (!context || !frame || !packet) {
             reset();
-            return failure("failed to allocate Opus encoder");
+            return Status::failure("failed to allocate Opus encoder");
         }
         context->sample_fmt = AV_SAMPLE_FMT_S16;
         context->sample_rate = format.sampleRate;
@@ -92,7 +88,7 @@ struct FFmpegOpusEncoder::Impl {
         const auto status = avcodec_open2(context, codec, nullptr);
         if (status < 0) {
             reset();
-            return failure(
+            return Status::failure(
                 "failed to open Opus encoder: " +
                 ffmpegError(status));
         }
@@ -102,10 +98,10 @@ struct FFmpegOpusEncoder::Impl {
 
     Status encode(const AudioRawFrame& audio) {
         if (!context) {
-            return failure("Opus encoder is not configured");
+            return Status::failure("Opus encoder is not configured");
         }
         if (!audio.samples) {
-            return failure("Opus encoder received an empty buffer");
+            return Status::failure("Opus encoder received an empty buffer");
         }
         const auto* data =
             static_cast<const std::uint8_t*>(audio.samples->data());
@@ -119,7 +115,7 @@ struct FFmpegOpusEncoder::Impl {
             format.sampleFormat != AudioSampleFormat::Signed16 ||
             format.sampleRate != inputFormat.sampleRate ||
             format.channels != inputFormat.channels) {
-            return failure("invalid Opus signed-16 input frame");
+            return Status::failure("invalid Opus signed-16 input frame");
         }
         const auto samples =
             static_cast<int>(size / bytesPerSample);
@@ -135,7 +131,7 @@ struct FFmpegOpusEncoder::Impl {
         const auto status = avcodec_send_frame(context, frame);
         if (status < 0) {
             errors.fetch_add(1);
-            return failure(
+            return Status::failure(
                 "failed to submit Opus frame: " +
                 ffmpegError(status));
         }
@@ -148,7 +144,7 @@ struct FFmpegOpusEncoder::Impl {
         }
         const auto status = avcodec_send_frame(context, nullptr);
         if (status < 0 && status != AVERROR_EOF) {
-            return failure(
+            return Status::failure(
                 "failed to flush Opus encoder: " +
                 ffmpegError(status));
         }
@@ -198,7 +194,7 @@ struct FFmpegOpusEncoder::Impl {
             }
             if (status < 0) {
                 errors.fetch_add(1);
-                return failure(
+                return Status::failure(
                     "failed to receive Opus packet: " +
                     ffmpegError(status));
             }

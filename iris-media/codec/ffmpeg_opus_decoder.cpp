@@ -21,10 +21,6 @@ extern "C" {
 namespace iris::media::codec {
 namespace {
 
-Status failure(std::string message) {
-    return Status{false, 1, std::move(message)};
-}
-
 std::string ffmpegError(int error) {
     char message[AV_ERROR_MAX_STRING_SIZE]{};
     if (av_strerror(error, message, sizeof(message)) < 0) {
@@ -67,19 +63,19 @@ struct FFmpegOpusDecoder::Impl {
     Status configure(const AudioDecoderConfig& config) {
         resetCodec();
         if (config.codecType != CodecType::Opus) {
-            return failure("Opus decoder requires Opus configuration");
+            return Status::failure("Opus decoder requires Opus configuration");
         }
         if (config.outputFormat.sampleRate <= 0 ||
             config.outputFormat.channels <= 0) {
-            return failure("invalid Opus output format");
+            return Status::failure("invalid Opus output format");
         }
         const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
         if (!codec) {
-            return failure("Opus decoder is unavailable");
+            return Status::failure("Opus decoder is unavailable");
         }
         decoder = avcodec_alloc_context3(codec);
         if (!decoder) {
-            return failure("failed to allocate Opus decoder");
+            return Status::failure("failed to allocate Opus decoder");
         }
         decoder->sample_rate = config.outputFormat.sampleRate;
         av_channel_layout_default(
@@ -87,7 +83,7 @@ struct FFmpegOpusDecoder::Impl {
         const auto result = avcodec_open2(decoder, codec, nullptr);
         if (result < 0) {
             resetCodec();
-            return failure(
+            return Status::failure(
                 "failed to open Opus decoder: " +
                 ffmpegError(result));
         }
@@ -97,31 +93,31 @@ struct FFmpegOpusDecoder::Impl {
 
     Status decode(const EncodedPacket& value) {
         if (!decoder) {
-            return failure("Opus decoder is not configured");
+            return Status::failure("Opus decoder is not configured");
         }
         if (value.kind != MediaKind::Audio ||
             value.codecType != CodecType::Opus) {
-            return failure("Opus decoder requires an Opus audio packet");
+            return Status::failure("Opus decoder requires an Opus audio packet");
         }
         if (!value.data) {
-            return failure("Opus decoder received an empty buffer");
+            return Status::failure("Opus decoder received an empty buffer");
         }
         const auto* data =
             static_cast<const std::uint8_t*>(value.data->data());
         const auto size = value.data->size();
         if (!data || size == 0 || size > INT_MAX) {
-            return failure("invalid Opus packet");
+            return Status::failure("invalid Opus packet");
         }
         streamId = value.streamId;
 
         AVPacket* input = av_packet_alloc();
         if (!input) {
-            return failure("failed to allocate Opus input packet");
+            return Status::failure("failed to allocate Opus input packet");
         }
         const auto alloc = av_new_packet(input, static_cast<int>(size));
         if (alloc < 0) {
             av_packet_free(&input);
-            return failure("failed to allocate Opus packet payload");
+            return Status::failure("failed to allocate Opus packet payload");
         }
         std::memcpy(input->data, data, size);
         input->pts = value.ptsMicros;
@@ -134,13 +130,13 @@ struct FFmpegOpusDecoder::Impl {
             }
             AVPacket* retry = av_packet_alloc();
             if (!retry) {
-                return failure("failed to allocate Opus retry packet");
+                return Status::failure("failed to allocate Opus retry packet");
             }
             const auto retryAlloc =
                 av_new_packet(retry, static_cast<int>(size));
             if (retryAlloc < 0) {
                 av_packet_free(&retry);
-                return failure("failed to allocate Opus retry payload");
+                return Status::failure("failed to allocate Opus retry payload");
             }
             std::memcpy(retry->data, data, size);
             retry->pts = value.ptsMicros;
@@ -149,7 +145,7 @@ struct FFmpegOpusDecoder::Impl {
         }
         if (result < 0 && result != AVERROR_EOF) {
             errors.fetch_add(1);
-            return failure(
+            return Status::failure(
                 "failed to submit Opus packet: " +
                 ffmpegError(result));
         }
@@ -162,7 +158,7 @@ struct FFmpegOpusDecoder::Impl {
         }
         const auto result = avcodec_send_packet(decoder, nullptr);
         if (result < 0 && result != AVERROR_EOF) {
-            return failure(
+            return Status::failure(
                 "failed to flush Opus decoder: " +
                 ffmpegError(result));
         }
@@ -172,7 +168,7 @@ struct FFmpegOpusDecoder::Impl {
     Status drain(std::int64_t fallbackPts) {
         AVFrame* decoded = av_frame_alloc();
         if (!decoded) {
-            return failure("failed to allocate Opus output frame");
+            return Status::failure("failed to allocate Opus output frame");
         }
         while (true) {
             const auto result = avcodec_receive_frame(decoder, decoded);
@@ -183,7 +179,7 @@ struct FFmpegOpusDecoder::Impl {
             if (result < 0) {
                 av_frame_free(&decoded);
                 errors.fetch_add(1);
-                return failure(
+                return Status::failure(
                     "failed to decode Opus packet: " +
                     ffmpegError(result));
             }

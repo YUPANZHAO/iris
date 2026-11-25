@@ -181,6 +181,19 @@ void testFactory() {
             "factory creates the Opus decoder");
 }
 
+void testStatusFailure() {
+    const auto defaultFailure = Status::failure("default failure");
+    require(!defaultFailure.ok, "failure status is not successful");
+    require(defaultFailure.code == 1,
+            "failure status uses the default error code");
+    require(defaultFailure.message == "default failure",
+            "failure status preserves the message");
+
+    const auto customFailure = Status::failure("custom failure", 42);
+    require(customFailure.code == 42,
+            "failure status accepts a custom error code");
+}
+
 } // namespace
 
 int main() {
@@ -191,12 +204,17 @@ int main() {
     static_assert(std::is_same_v<
                   MediaBuffer,
                   std::shared_ptr<iris::media::ByteBuffer>>);
+    static_assert(std::is_same_v<
+                  iris::media::MediaBuffer, MediaBuffer>);
+    static_assert(std::is_same_v<
+                  iris::media::Status, Status>);
     static_assert(!std::is_abstract_v<FFmpegH264Encoder>);
     static_assert(!std::is_abstract_v<FFmpegOpusEncoder>);
     static_assert(!std::is_abstract_v<FFmpegH264Decoder>);
     static_assert(!std::is_abstract_v<FFmpegOpusDecoder>);
 
     testFactory();
+    testStatusFailure();
     testOpusRoundTrip();
     testH264RoundTrip();
     std::cout << "iris-media codec tests passed\n";

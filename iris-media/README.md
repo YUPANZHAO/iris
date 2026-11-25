@@ -72,5 +72,46 @@ implementations:
 - `FFmpegH264Encoder`, `FFmpegH264Decoder`, `FFmpegOpusEncoder`, and
   `FFmpegOpusDecoder` provide the current implementations.
 
-Set `IRIS_MEDIA_BUILD_CODECS=OFF` for an engine-only build. Codec consumers can
-include `codec/codec.h` and link `iris::media::codec`.
+Set both `IRIS_MEDIA_BUILD_CODECS=OFF` and
+`IRIS_MEDIA_BUILD_CAPTURE_SOURCES=OFF` for an engine-only build. Codec consumers
+can include `codec/codec.h` and link `iris::media::codec`.
+
+The optional capture-source module is compiled directly into the `iris-media`
+target when `IRIS_MEDIA_BUILD_CAPTURE_SOURCES` is enabled:
+
+- `CaptureSource` owns the common `start()`, `stop()`, `running()`, and error
+  contract.
+- `AudioCaptureSource` and `VideoCaptureSource` add typed configuration, output
+  formats, and frame sinks.
+- `StreamId`, `AttributeMap`, `MediaKind`, `Status`, and `MediaBuffer` are
+  shared through `media_types.h`.
+- `FFmpegAudioCaptureSource` and `FFmpegVideoCaptureSource` open FFmpeg input
+  devices in a background thread. `backend` selects a backend such as
+  `dshow`, `v4l2`, `alsa`, or `lavfi`, while `options` forwards device options.
+- Audio capture converts with libswresample to the requested rate, channel
+  count, and signed-16 or float sample format.
+- Video capture converts with libswscale to the requested dimensions, frame
+  rate, and I420, NV12, or BGRA pixel format.
+- Frame callbacks are asynchronous. Keeping the source object alive is the
+  caller's responsibility through `configure()`, `start()`, and `stop()`.
+
+Include the typed header (or the `capture_source/capture.h` umbrella) and link
+`iris::media`:
+
+```cpp
+#include "capture_source/ffmpeg_video_capture_source.h"
+
+auto source =
+    std::make_shared<iris::media::capture::FFmpegVideoCaptureSource>();
+source->setFrameSink(frameSink);
+
+iris::media::capture::VideoCaptureConfig config;
+config.backend = "dshow";
+config.name = "video=Integrated Camera";
+source->configure(config);
+source->start();
+// ...
+source->stop();
+```
+
+Set `IRIS_MEDIA_BUILD_CAPTURE_SOURCES=OFF` to omit this target.

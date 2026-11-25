@@ -9,15 +9,30 @@ project(
 
 option(IRIS_MEDIA_BUILD_TESTS "Build iris-media tests" ${PROJECT_IS_TOP_LEVEL})
 option(IRIS_MEDIA_BUILD_CODECS "Build FFmpeg codec implementations" ON)
+option(
+  IRIS_MEDIA_BUILD_CAPTURE_SOURCES
+  "Build FFmpeg capture source implementations"
+  ON
+)
 
 find_package(Threads REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS container)
 
-add_library(iris-media STATIC
+set(_iris_media_sources
   engine/simple_task_queue.cpp
   engine/memory_pool.cpp
   engine/pmr_memory_pool.cpp
 )
+
+if(IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
+  list(APPEND _iris_media_sources
+    capture_source/ffmpeg_audio_capture_source.cpp
+    capture_source/ffmpeg_video_capture_source.cpp
+  )
+endif()
+
+add_library(iris-media STATIC ${_iris_media_sources})
+unset(_iris_media_sources)
 add_library(iris::media ALIAS iris-media)
 
 target_compile_features(iris-media PUBLIC cxx_std_17)
@@ -37,13 +52,27 @@ else()
   target_compile_options(iris-media PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-if(IRIS_MEDIA_BUILD_CODECS)
+if(IRIS_MEDIA_BUILD_CODECS OR IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
   set(_iris_media_module_path "${CMAKE_MODULE_PATH}")
   list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   find_package(FFMPEG REQUIRED)
   set(CMAKE_MODULE_PATH "${_iris_media_module_path}")
   unset(_iris_media_module_path)
 
+  if(IRIS_MEDIA_BUILD_CAPTURE_SOURCES AND
+      (NOT FFMPEG_AVFORMAT_LIBRARY OR NOT FFMPEG_AVDEVICE_LIBRARY))
+    message(FATAL_ERROR
+      "FFmpeg avformat and avdevice libraries are required for capture")
+  endif()
+endif()
+
+if(IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
+  target_include_directories(
+    iris-media SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})
+  target_link_libraries(iris-media PRIVATE ${FFMPEG_LIBRARIES})
+endif()
+
+if(IRIS_MEDIA_BUILD_CODECS)
   add_library(iris-media-codec STATIC
     codec/ffmpeg_codec_factory.cpp
     codec/ffmpeg_h264_decoder.cpp
@@ -138,5 +167,65 @@ if(IRIS_MEDIA_BUILD_TESTS)
     endif()
 
     add_test(NAME iris-media-codec-test COMMAND iris-media-codec-test)
+  endif()
+
+  if(IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
+    add_executable(
+      iris-media-capture-source-test
+      tests/capture_source_test.cpp
+    )
+    target_compile_features(
+      iris-media-capture-source-test PRIVATE cxx_std_17)
+    target_link_libraries(
+      iris-media-capture-source-test
+      PRIVATE iris::media
+    )
+
+    if(WIN32)
+      add_custom_command(
+        TARGET iris-media-capture-source-test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:Boost::container>"
+          "$<TARGET_FILE_DIR:iris-media-capture-source-test>"
+        VERBATIM
+      )
+
+      if(DEFINED VCPKG_INSTALLED_DIR)
+        set(_iris_media_capture_runtime_dir
+          "${VCPKG_INSTALLED_DIR}/x64-windows/bin")
+      else()
+        get_filename_component(
+          _iris_media_ffmpeg_prefix "${FFMPEG_INCLUDE_DIR}" DIRECTORY)
+        set(_iris_media_capture_runtime_dir
+          "${_iris_media_ffmpeg_prefix}/bin")
+      endif()
+      file(GLOB _iris_media_capture_runtime_dlls
+        "${_iris_media_capture_runtime_dir}/avcodec-*.dll"
+        "${_iris_media_capture_runtime_dir}/avdevice-*.dll"
+        "${_iris_media_capture_runtime_dir}/avfilter-*.dll"
+        "${_iris_media_capture_runtime_dir}/avformat-*.dll"
+        "${_iris_media_capture_runtime_dir}/avutil-*.dll"
+        "${_iris_media_capture_runtime_dir}/swresample-*.dll"
+        "${_iris_media_capture_runtime_dir}/swscale-*.dll"
+      )
+      if(_iris_media_capture_runtime_dlls)
+        add_custom_command(
+          TARGET iris-media-capture-source-test POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_iris_media_capture_runtime_dlls}
+            $<TARGET_FILE_DIR:iris-media-capture-source-test>
+          VERBATIM
+        )
+      endif()
+      unset(_iris_media_capture_runtime_dir)
+      unset(_iris_media_ffmpeg_prefix)
+    endif()
+
+    add_test(
+      NAME iris-media-capture-source-test
+      COMMAND iris-media-capture-source-test
+    )
+    set_tests_properties(
+      iris-media-capture-source-test PROPERTIES TIMEOUT 20)
   endif()
 endif()

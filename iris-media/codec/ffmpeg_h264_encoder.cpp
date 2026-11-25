@@ -19,10 +19,6 @@ extern "C" {
 namespace iris::media::codec {
 namespace {
 
-Status failure(std::string message) {
-    return Status{false, 1, std::move(message)};
-}
-
 std::string ffmpegError(int error) {
     char message[AV_ERROR_MAX_STRING_SIZE]{};
     if (av_strerror(error, message, sizeof(message)) < 0) {
@@ -167,7 +163,7 @@ struct FFmpegH264Encoder::Impl {
     Status configure(const VideoEncoderConfig& config) {
         reset();
         if (config.codecType != CodecType::H264) {
-            return failure("H.264 encoder requires H.264 configuration");
+            return Status::failure("H.264 encoder requires H.264 configuration");
         }
         const auto& format = config.inputFormat;
         if (format.width <= 0 || format.height <= 0 ||
@@ -175,19 +171,19 @@ struct FFmpegH264Encoder::Impl {
             format.frameRate.numerator <= 0 ||
             format.frameRate.denominator <= 0 ||
             format.pixelFormat != VideoPixelFormat::I420) {
-            return failure(
+            return Status::failure(
                 "H.264 encoder requires even I420 video dimensions");
         }
         const AVCodec* codec = avcodec_find_encoder_by_name("libopenh264");
         if (!codec) {
-            return failure("libopenh264 encoder is unavailable");
+            return Status::failure("libopenh264 encoder is unavailable");
         }
         context = avcodec_alloc_context3(codec);
         frame = av_frame_alloc();
         packet = av_packet_alloc();
         if (!context || !frame || !packet) {
             reset();
-            return failure("failed to allocate H.264 encoder");
+            return Status::failure("failed to allocate H.264 encoder");
         }
         const auto fps = std::max(
             1,
@@ -213,7 +209,7 @@ struct FFmpegH264Encoder::Impl {
         const auto status = avcodec_open2(context, codec, nullptr);
         if (status < 0) {
             reset();
-            return failure(
+            return Status::failure(
                 "failed to open OpenH264 encoder: " +
                 ffmpegError(status));
         }
@@ -227,10 +223,10 @@ struct FFmpegH264Encoder::Impl {
 
     Status encode(const VideoRawFrame& video) {
         if (!context) {
-            return failure("H.264 encoder is not configured");
+            return Status::failure("H.264 encoder is not configured");
         }
         if (!video.pixels) {
-            return failure("H.264 encoder received an empty buffer");
+            return Status::failure("H.264 encoder received an empty buffer");
         }
         auto* data = const_cast<std::uint8_t*>(
             static_cast<const std::uint8_t*>(video.pixels->data()));
@@ -244,12 +240,12 @@ struct FFmpegH264Encoder::Impl {
                 inputFrameRate.numerator ||
             video.format.frameRate.denominator !=
                 inputFrameRate.denominator) {
-            return failure("invalid H.264 I420 input frame");
+            return Status::failure("invalid H.264 I420 input frame");
         }
         const auto expected =
             static_cast<std::size_t>(width) * height * 3 / 2;
         if (size < expected) {
-            return failure("truncated H.264 I420 input frame");
+            return Status::failure("truncated H.264 I420 input frame");
         }
         frame->format = AV_PIX_FMT_YUV420P;
         frame->width = width;
@@ -269,7 +265,7 @@ struct FFmpegH264Encoder::Impl {
         const auto status = avcodec_send_frame(context, frame);
         if (status < 0) {
             errors.fetch_add(1);
-            return failure(
+            return Status::failure(
                 "failed to submit H.264 frame: " +
                 ffmpegError(status));
         }
@@ -282,7 +278,7 @@ struct FFmpegH264Encoder::Impl {
         }
         const auto status = avcodec_send_frame(context, nullptr);
         if (status < 0 && status != AVERROR_EOF) {
-            return failure(
+            return Status::failure(
                 "failed to flush H.264 encoder: " +
                 ffmpegError(status));
         }
@@ -358,7 +354,7 @@ struct FFmpegH264Encoder::Impl {
             }
             if (status < 0) {
                 errors.fetch_add(1);
-                return failure(
+                return Status::failure(
                     "failed to receive H.264 packet: " +
                     ffmpegError(status));
             }

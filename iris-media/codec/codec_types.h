@@ -2,38 +2,23 @@
 
 // Shared codec contracts, frame/packet types, and abstract codec interfaces.
 
-#include "engine/memory_pool.h"
+#include "media_types.h"
 
 #include <cstddef>
-#include <cstdint>
-#include <map>
-#include <memory>
-#include <string>
 
 namespace iris::media::codec {
 
-using StreamId = std::uint64_t;
-using AttributeMap = std::map<std::string, std::string>;
-
-enum class MediaKind {
-    Unknown,
-    Audio,
-    Video,
-};
+using ::iris::media::AttributeMap;
+using ::iris::media::MediaBuffer;
+using ::iris::media::MediaKind;
+using ::iris::media::Status;
+using ::iris::media::StreamId;
 
 enum class CodecType {
     Unknown,
     H264,
     Opus,
 };
-
-struct Status {
-    bool ok = true;
-    int code = 0;
-    std::string message;
-};
-
-using MediaBuffer = std::shared_ptr<ByteBuffer>;
 
 struct EncodedPacket {
     StreamId streamId = 0;
