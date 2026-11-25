@@ -13,6 +13,12 @@ public:
     ByteBuffer();
     explicit ByteBuffer(std::size_t capacity);
     ByteBuffer(std::size_t capacity, MemoryPool& pool);
+    ByteBuffer(const void* data, std::size_t size);
+    ByteBuffer(const void* data, std::size_t size, MemoryPool& pool);
+    ByteBuffer(const void* data,
+               std::size_t size,
+               std::size_t capacity,
+               MemoryPool& pool);
     ~ByteBuffer();
 
     ByteBuffer(const ByteBuffer&) = delete;

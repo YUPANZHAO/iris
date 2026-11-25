@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -28,6 +29,7 @@ public:
         std::uint8_t* data = nullptr;
         {
             std::lock_guard<std::mutex> lock(tracker_->mutex);
+            ++tracker_->allocated_count;
             auto entry = tracker_->free_blocks.find(capacity);
             if (entry != tracker_->free_blocks.end() &&
                 !entry->second.empty()) {
@@ -62,6 +64,11 @@ public:
         return tracker_->released_count;
     }
 
+    int AllocatedCount() const {
+        std::lock_guard<std::mutex> lock(tracker_->mutex);
+        return tracker_->allocated_count;
+    }
+
     void* LastReleased() const {
         std::lock_guard<std::mutex> lock(tracker_->mutex);
         return tracker_->last_released;
@@ -77,6 +84,7 @@ private:
             }
         }
 
+        int allocated_count = 0;
         int released_count = 0;
         void* last_released = nullptr;
         mutable std::mutex mutex;
@@ -276,6 +284,45 @@ void test_byte_buffer_returns_memory() {
             "buffer destruction returns its allocation to the pool");
 }
 
+void test_byte_buffer_copy_constructors() {
+    const std::uint8_t source[] = {1, 2, 3, 4, 5, 6};
+
+    iris::media::ByteBuffer copied(source, sizeof(source));
+    require(copied.size() == sizeof(source),
+            "copy constructor preserves the source size");
+    require(copied.capacity() == sizeof(source),
+            "copy constructor defaults capacity to size");
+    require(std::memcmp(
+                copied.data(), source, sizeof(source)) == 0,
+            "copy constructor copies the source bytes");
+
+    TrackingMemoryPool pool;
+    iris::media::ByteBuffer pooled(source, 4, pool);
+    require(pooled.size() == 4 && pooled.capacity() == 4,
+            "pool copy constructor uses size as capacity");
+    require(std::memcmp(pooled.data(), source, 4) == 0,
+            "pool copy constructor copies the requested bytes");
+
+    iris::media::ByteBuffer sized(source, 4, 8, pool);
+    require(sized.size() == 4 && sized.capacity() == 8,
+            "capacity constructor preserves logical size and capacity");
+    require(std::memcmp(sized.data(), source, 4) == 0,
+            "capacity constructor copies the requested bytes");
+
+    iris::media::ByteBuffer missingData(nullptr, 4, pool);
+    require(missingData && missingData.size() == 4 &&
+                missingData.capacity() == 4,
+            "constructor supports an empty source with recorded size");
+
+    const auto allocations = pool.AllocatedCount();
+    iris::media::ByteBuffer noAllocation(nullptr, 0, 0, pool);
+    require(!noAllocation && noAllocation.size() == 0 &&
+                noAllocation.capacity() == 0,
+            "zero capacity keeps an empty buffer");
+    require(pool.AllocatedCount() == allocations,
+            "zero capacity does not call the pool");
+}
+
 void test_custom_pool_recycles_blocks() {
     TrackingMemoryPool pool;
     const auto* original_block = static_cast<const std::uint8_t*>(nullptr);
@@ -299,6 +346,7 @@ int main() {
     test_delayed_task();
     test_byte_buffer();
     test_byte_buffer_returns_memory();
+    test_byte_buffer_copy_constructors();
     test_custom_pool_recycles_blocks();
     std::cout << "iris-media engine tests passed\n";
     return EXIT_SUCCESS;

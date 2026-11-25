@@ -2,20 +2,41 @@
 
 #include "engine/pmr_memory_pool.h"
 
+#include <cassert>
+#include <cstring>
 #include <utility>
 
 namespace iris::media {
 
 ByteBuffer::ByteBuffer()
-    : ByteBuffer(0, PmrMemoryPool::Instance()) {
+    : ByteBuffer(nullptr, 0, 0, PmrMemoryPool::Instance()) {
 }
 
 ByteBuffer::ByteBuffer(std::size_t capacity)
-    : ByteBuffer(capacity, PmrMemoryPool::Instance()) {
+    : ByteBuffer(
+        nullptr, capacity, capacity, PmrMemoryPool::Instance()) {
 }
 
 ByteBuffer::ByteBuffer(std::size_t capacity, MemoryPool& pool)
-    : pool_(&pool) {
+    : ByteBuffer(nullptr, capacity, capacity, pool) {
+}
+
+ByteBuffer::ByteBuffer(const void* data, std::size_t size)
+    : ByteBuffer(data, size, PmrMemoryPool::Instance()) {
+}
+
+ByteBuffer::ByteBuffer(const void* data,
+                       std::size_t size,
+                       MemoryPool& pool)
+    : ByteBuffer(data, size, size, pool) {
+}
+
+ByteBuffer::ByteBuffer(const void* data,
+                       std::size_t size,
+                       std::size_t capacity,
+                       MemoryPool& pool)
+    : pool_(&pool), size_(size) {
+    assert(size <= capacity);
     if (capacity == 0) {
         return;
     }
@@ -27,7 +48,9 @@ ByteBuffer::ByteBuffer(std::size_t capacity, MemoryPool& pool)
     }
 
     capacity_ = capacity;
-    size_ = capacity;
+    if (data != nullptr && size <= capacity) {
+        std::memcpy(allocation_, data, size);
+    }
 }
 
 ByteBuffer::~ByteBuffer() {
