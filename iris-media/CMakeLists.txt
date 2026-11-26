@@ -106,6 +106,35 @@ if(IRIS_MEDIA_BUILD_CODECS)
   endif()
 endif()
 
+if(IRIS_MEDIA_BUILD_CODECS AND IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
+  add_library(iris-media-pipeline STATIC
+    pipeline/stream.cpp
+    pipeline/ffmpeg_audio_stream.cpp
+    pipeline/ffmpeg_video_stream.cpp
+    pipeline/rtp_media_stream.cpp
+  )
+  add_library(iris::media::pipeline ALIAS iris-media-pipeline)
+
+  target_compile_features(iris-media-pipeline PUBLIC cxx_std_17)
+  target_include_directories(iris-media-pipeline
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(
+    iris-media-pipeline
+    PUBLIC iris::media::codec
+  )
+
+  if(MSVC)
+    target_compile_options(
+      iris-media-pipeline PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(
+      iris-media-pipeline PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endif()
+
 if(IRIS_MEDIA_BUILD_TRANSPORT)
   add_library(iris-media-transport STATIC
     transport/rtp_engine.cpp
@@ -256,6 +285,34 @@ if(IRIS_MEDIA_BUILD_TESTS)
     )
     set_tests_properties(
       iris-media-capture-source-test PROPERTIES TIMEOUT 20)
+  endif()
+
+  if(IRIS_MEDIA_BUILD_CODECS AND IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
+    add_executable(
+      iris-media-pipeline-test
+      tests/pipeline_test.cpp
+    )
+    target_compile_features(
+      iris-media-pipeline-test PRIVATE cxx_std_17)
+    target_link_libraries(
+      iris-media-pipeline-test
+      PRIVATE iris::media::pipeline
+    )
+
+    if(WIN32)
+      add_custom_command(
+        TARGET iris-media-pipeline-test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:Boost::container>"
+          "$<TARGET_FILE_DIR:iris-media-pipeline-test>"
+        VERBATIM
+      )
+    endif()
+
+    add_test(
+      NAME iris-media-pipeline-test
+      COMMAND iris-media-pipeline-test
+    )
   endif()
 
   if(IRIS_MEDIA_BUILD_TRANSPORT)

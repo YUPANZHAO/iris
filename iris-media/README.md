@@ -143,6 +143,26 @@ transport boundary and a small RTP implementation:
 - Inbound media PTS values are zero-based on the first RTP timestamp observed
   for each stream.
 
+When codecs and capture sources are both enabled, `iris-media-pipeline`
+provides capture-to-encoder stream nodes:
+
+- `Stream` defines `open()`, `close()`, and the encoded-packet sink boundary.
+  `open()` and `close()` are implemented by concrete streams.
+- `ffmpeg_audio_stream` connects an `AudioCaptureSource` to an
+  `AudioEncoder`.
+- `ffmpeg_video_stream` connects a `VideoCaptureSource` to a
+  `VideoEncoder`.
+- `RtpMediaStream` subscribes to an `RTPTransport` and publishes its
+  processed RTP payloads as the configured audio or video media kind.
+- `setCapture()` and `setEncoder()` accept either `shared_ptr` or
+  `unique_ptr` ownership. Callers configure the capture source and encoder
+  before calling `open()`.
+- `setRTPTransport()` likewise accepts either ownership form. Opening the RTP
+  media stream registers it as the transport sink; closing it unregisters the
+  sink.
+
+Include `pipeline/pipeline.h` and link `iris::media::pipeline`.
+
 Encoded packets larger than the configured `mtu` are split into consecutive
 RTP datagrams with the same timestamp. The MTU is the maximum RTP datagram
 size including the 12-byte RTP header. Include `transport/rtp.h` and link
