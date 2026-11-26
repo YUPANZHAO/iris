@@ -258,7 +258,7 @@ private:
 };
 
 void testAudioPipeline() {
-    auto stream = std::make_shared<pipeline::ffmpeg_audio_stream>();
+    auto stream = std::make_shared<pipeline::CaptureAudioStream>();
     auto capture = std::make_unique<MockAudioCapture>();
     auto encoder = std::make_unique<MockAudioEncoder>();
     auto* capturePointer = capture.get();
@@ -291,7 +291,7 @@ void testAudioPipeline() {
 }
 
 void testVideoPipeline() {
-    auto stream = std::make_shared<pipeline::ffmpeg_video_stream>();
+    auto stream = std::make_shared<pipeline::CaptureVideoStream>();
     auto capture = std::make_unique<MockVideoCapture>();
     auto encoder = std::make_unique<MockVideoEncoder>();
     auto* capturePointer = capture.get();

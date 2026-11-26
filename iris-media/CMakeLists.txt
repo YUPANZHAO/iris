@@ -109,8 +109,7 @@ endif()
 if(IRIS_MEDIA_BUILD_CODECS AND IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
   add_library(iris-media-pipeline STATIC
     pipeline/stream.cpp
-    pipeline/ffmpeg_audio_stream.cpp
-    pipeline/ffmpeg_video_stream.cpp
+    pipeline/capture_stream.cpp
     pipeline/rtp_media_stream.cpp
   )
   add_library(iris::media::pipeline ALIAS iris-media-pipeline)

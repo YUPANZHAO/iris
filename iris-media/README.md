@@ -148,9 +148,9 @@ provides capture-to-encoder stream nodes:
 
 - `Stream` defines `open()`, `close()`, and the encoded-packet sink boundary.
   `open()` and `close()` are implemented by concrete streams.
-- `ffmpeg_audio_stream` connects an `AudioCaptureSource` to an
+- `CaptureAudioStream` connects an `AudioCaptureSource` to an
   `AudioEncoder`.
-- `ffmpeg_video_stream` connects a `VideoCaptureSource` to a
+- `CaptureVideoStream` connects a `VideoCaptureSource` to a
   `VideoEncoder`.
 - `RtpMediaStream` subscribes to an `RTPTransport` and publishes its
   processed RTP payloads as the configured audio or video media kind.
