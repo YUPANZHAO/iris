@@ -52,6 +52,16 @@ valid byte count, which can be updated with `setSize()` up to `capacity()`.
 milliseconds. `SimpleTaskQueue` cleans up in its destructor, so callers do not
 need to expose or invoke queue shutdown through the abstract interface.
 
+The `iris-media-sdp` target provides direct SDP utility classes without
+interface base classes:
+
+- `SdpBuilder` serializes an `SdpSessionDescription`.
+- `SdpParser` parses and validates SDP text.
+- `SdpNegotiator` creates offers and answers, applies remote answers, and
+  selects mutually supported codecs and media directions.
+
+Include `sdp/sdp.h` and link `iris::media::sdp`.
+
 The optional `iris-media-codec` target provides a codec-neutral API and FFmpeg
 implementations:
 

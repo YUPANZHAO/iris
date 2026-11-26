@@ -53,6 +53,25 @@ else()
   target_compile_options(iris-media PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(iris-media-sdp STATIC sdp/sdp.cpp)
+add_library(iris::media::sdp ALIAS iris-media-sdp)
+
+target_compile_features(iris-media-sdp PUBLIC cxx_std_17)
+target_include_directories(iris-media-sdp
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(iris-media-sdp PUBLIC iris::media)
+
+if(MSVC)
+  target_compile_options(
+    iris-media-sdp PRIVATE /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    iris-media-sdp PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 if(IRIS_MEDIA_BUILD_CODECS OR IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
   set(_iris_media_module_path "${CMAKE_MODULE_PATH}")
   list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -164,6 +183,22 @@ endif()
 
 if(IRIS_MEDIA_BUILD_TESTS)
   enable_testing()
+
+  add_executable(iris-media-sdp-test tests/sdp_test.cpp)
+  target_compile_features(iris-media-sdp-test PRIVATE cxx_std_17)
+  target_link_libraries(
+    iris-media-sdp-test PRIVATE iris::media::sdp)
+
+  if(WIN32)
+    add_custom_command(TARGET iris-media-sdp-test POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:Boost::container>"
+        "$<TARGET_FILE_DIR:iris-media-sdp-test>"
+      VERBATIM
+    )
+  endif()
+
+  add_test(NAME iris-media-sdp-test COMMAND iris-media-sdp-test)
 
   add_executable(iris-media-engine-test tests/engine_test.cpp)
   target_compile_features(iris-media-engine-test PRIVATE cxx_std_17)
