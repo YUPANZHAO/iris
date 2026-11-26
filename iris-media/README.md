@@ -1,7 +1,7 @@
 # iris-media
 
-`iris-media` contains reusable execution, memory, and codec primitives for the
-media pipeline.
+`iris-media` contains reusable execution, memory, codec, transport, and capture
+primitives for the media pipeline.
 
 The `engine` library currently provides:
 
@@ -115,3 +115,35 @@ source->stop();
 ```
 
 Set `IRIS_MEDIA_BUILD_CAPTURE_SOURCES=OFF` to omit this target.
+
+The optional `iris-media-transport` target provides the RTP payload
+transport boundary and a small RTP implementation:
+
+- `Transport` is the message-oriented base interface with
+  `send(MediaBuffer)`, `setSink()`, `configure()`, `attach()`, and `detach()`.
+- `configure()` binds local settings such as `localAddress`/`bindAddress` and
+  `localPort`/`port`. `attach()` sets `remoteAddress`/`remotePort` or
+  `remoteEndpoint` and starts receiving. `detach()` closes the socket.
+- `ITransportSink::onTransportState()` reports configuring, configured,
+  attaching, connected, detaching, disconnected, and failed states.
+- `UdpTransport` implements the interface on top of a cross-platform UDP
+  socket with an asynchronous receive thread.
+- `RTPTransport` inherits `Transport` and sends
+  `send(RtpParams, EncodedPacket)`.
+- Stream ID to payload type and clock rate bindings are supplied through
+  `configure()` or `attach()` using `stream.<id>.payloadType` and
+  `stream.<id>.clockRate`.
+- `RtpParams` carries the RTP marker. RTPEngine manages SSRC, sequence numbers,
+  timestamps, and fragmentation.
+- `RTPTransportSink::onRtpRecv()` receives `RtpParams` and `EncodedPacket`.
+  `onRtcpRecv()` receives `RtcpParams` values split from compound RTCP.
+- `RTPEngine` derives from `RTPTransport`, creates a `UdpTransport` internally,
+  and manages per-stream RTP sequence numbers, timestamps, SSRC values,
+  timestamp origins, and payload-type routing.
+- Inbound media PTS values are zero-based on the first RTP timestamp observed
+  for each stream.
+
+Encoded packets larger than the configured `mtu` are split into consecutive
+RTP datagrams with the same timestamp. The MTU is the maximum RTP datagram
+size including the 12-byte RTP header. Include `transport/rtp.h` and link
+`iris::media::transport`.

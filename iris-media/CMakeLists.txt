@@ -9,6 +9,7 @@ project(
 
 option(IRIS_MEDIA_BUILD_TESTS "Build iris-media tests" ${PROJECT_IS_TOP_LEVEL})
 option(IRIS_MEDIA_BUILD_CODECS "Build FFmpeg codec implementations" ON)
+option(IRIS_MEDIA_BUILD_TRANSPORT "Build RTP transport implementations" ON)
 option(
   IRIS_MEDIA_BUILD_CAPTURE_SOURCES
   "Build FFmpeg capture source implementations"
@@ -102,6 +103,34 @@ if(IRIS_MEDIA_BUILD_CODECS)
   else()
     target_compile_options(
       iris-media-codec PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endif()
+
+if(IRIS_MEDIA_BUILD_TRANSPORT)
+  add_library(iris-media-transport STATIC
+    transport/rtp_engine.cpp
+    transport/udp_transport.cpp
+  )
+  add_library(iris::media::transport ALIAS iris-media-transport)
+
+  target_compile_features(iris-media-transport PUBLIC cxx_std_17)
+  target_include_directories(iris-media-transport
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(iris-media-transport PUBLIC iris::media)
+
+  if(WIN32)
+    target_link_libraries(iris-media-transport PRIVATE ws2_32)
+  endif()
+
+  if(MSVC)
+    target_compile_options(
+      iris-media-transport PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(
+      iris-media-transport PRIVATE -Wall -Wextra -Wpedantic)
   endif()
 endif()
 
@@ -227,5 +256,33 @@ if(IRIS_MEDIA_BUILD_TESTS)
     )
     set_tests_properties(
       iris-media-capture-source-test PROPERTIES TIMEOUT 20)
+  endif()
+
+  if(IRIS_MEDIA_BUILD_TRANSPORT)
+    add_executable(
+      iris-media-transport-test
+      tests/transport_test.cpp
+    )
+    target_compile_features(
+      iris-media-transport-test PRIVATE cxx_std_17)
+    target_link_libraries(
+      iris-media-transport-test
+      PRIVATE iris::media::transport
+    )
+
+    if(WIN32)
+      add_custom_command(
+        TARGET iris-media-transport-test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:Boost::container>"
+          "$<TARGET_FILE_DIR:iris-media-transport-test>"
+        VERBATIM
+      )
+    endif()
+
+    add_test(
+      NAME iris-media-transport-test
+      COMMAND iris-media-transport-test
+    )
   endif()
 endif()
