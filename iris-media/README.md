@@ -104,6 +104,10 @@ target when `IRIS_MEDIA_BUILD_CAPTURE_SOURCES` is enabled:
   rate, and I420, NV12, or BGRA pixel format.
 - Frame callbacks are asynchronous. Keeping the source object alive is the
   caller's responsibility through `configure()`, `start()`, and `stop()`.
+- `EmptyAudioCaptureSource` emits silent PCM frames, while
+  `EmptyVideoCaptureSource` emits a dark-gray video canvas with centered white
+  text. Both accept display text in their constructors and can run without a
+  physical device.
 
 Include the typed header (or the `capture_source/capture.h` umbrella) and link
 `iris::media`:
@@ -172,6 +176,40 @@ provides capture-to-encoder stream nodes:
   sink.
 
 Include `pipeline/pipeline.h` and link `iris::media::pipeline`.
+
+The optional `iris-media-control` target provides protocol-independent stream
+management and SDP-driven stream construction:
+
+- `MediaControl` owns multiple `pipeline::Stream` objects, assigns stream ids,
+  and provides `stream()`, `streams()`, `startAll()`, and `stopAll()`.
+- `MediaControlSink::onStreamCreate()` receives each stream created internally
+  before it is registered. The callback can configure the default capture or
+  RTP stream, or replace `MediaStream::stream` with the application's send
+  stream. Returning an error aborts the transaction.
+- `SdpMediaControl` follows the WebRTC peer-connection flow:
+
+```text
+createOffer() -> setLocalDescription() -> setRemoteDescription(answer)
+setRemoteDescription(offer) -> createAnswer() -> setLocalDescription()
+```
+
+- Streams are built from the accepted media sections during answer creation or
+  remote-answer application. Sendrecv entries contain both the local
+  `CaptureStream` and the remote `RtpMediaStream`.
+- Send media attach an `EmptyAudioCaptureSource` or
+  `EmptyVideoCaptureSource` to a `CaptureStream`, configure the negotiated
+  FFmpeg encoder, and route encoded packets into the media's `RTPEngine`.
+- Receive media use `RtpMediaStream` with the same `RTPEngine`, so RTP
+  reception is ready before capture starts.
+- `MediaControl::startAll()` binds the RTPEngine using the local and remote SDP
+  endpoints. `stopAll()` closes streams and detaches the engines.
+- `SdpMediaControl` is constructed from `SdpNegotiationInput`, which declares
+  the local media, codec preferences, addresses, ports, and directions.
+- `setMediaControlSink()` stores only a weak reference. The application must
+  retain the sink for as long as callbacks are needed.
+
+Include `control/control.h` and link `iris::media::control`. The target is
+available when the codec, capture-source, and transport modules are enabled.
 
 Encoded packets larger than the configured `mtu` are split into consecutive
 RTP datagrams with the same timestamp. The MTU is the maximum RTP datagram

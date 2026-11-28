@@ -27,6 +27,8 @@ set(_iris_media_sources
 
 if(IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
   list(APPEND _iris_media_sources
+    capture_source/device_query.cpp
+    capture_source/empty_capture_source.cpp
     capture_source/ffmpeg_audio_capture_source.cpp
     capture_source/ffmpeg_video_capture_source.cpp
   )
@@ -153,9 +155,41 @@ if(IRIS_MEDIA_BUILD_CODECS AND IRIS_MEDIA_BUILD_CAPTURE_SOURCES)
   endif()
 endif()
 
+if(IRIS_MEDIA_BUILD_CODECS AND
+    IRIS_MEDIA_BUILD_CAPTURE_SOURCES AND
+    IRIS_MEDIA_BUILD_TRANSPORT)
+  add_library(iris-media-control STATIC
+    control/media_control.cpp
+    control/sdp_media_control.cpp
+  )
+  add_library(iris::media::control ALIAS iris-media-control)
+
+  target_compile_features(iris-media-control PUBLIC cxx_std_17)
+  target_include_directories(iris-media-control
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(
+    iris-media-control
+    PUBLIC iris::media::pipeline
+    PUBLIC iris::media::sdp
+    PUBLIC iris::media::transport
+  )
+
+  if(MSVC)
+    target_compile_options(
+      iris-media-control PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(
+      iris-media-control PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endif()
+
 if(IRIS_MEDIA_BUILD_TRANSPORT)
   add_library(iris-media-transport STATIC
     transport/rtp_engine.cpp
+    transport/udp_port.cpp
     transport/udp_transport.cpp
   )
   add_library(iris::media::transport ALIAS iris-media-transport)
@@ -347,6 +381,64 @@ if(IRIS_MEDIA_BUILD_TESTS)
       NAME iris-media-pipeline-test
       COMMAND iris-media-pipeline-test
     )
+
+    if(IRIS_MEDIA_BUILD_TRANSPORT)
+      add_executable(
+        iris-media-control-test
+        tests/control_test.cpp
+      )
+      target_compile_features(
+        iris-media-control-test PRIVATE cxx_std_17)
+      target_link_libraries(
+        iris-media-control-test
+        PRIVATE iris::media::control
+      )
+
+      if(WIN32)
+        add_custom_command(
+          TARGET iris-media-control-test POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Boost::container>"
+            "$<TARGET_FILE_DIR:iris-media-control-test>"
+          VERBATIM
+        )
+
+        if(DEFINED VCPKG_INSTALLED_DIR)
+          set(_iris_media_control_runtime_dir
+            "${VCPKG_INSTALLED_DIR}/x64-windows/bin")
+        else()
+          get_filename_component(
+            _iris_media_ffmpeg_prefix "${FFMPEG_INCLUDE_DIR}" DIRECTORY)
+          set(_iris_media_control_runtime_dir
+            "${_iris_media_ffmpeg_prefix}/bin")
+        endif()
+        file(GLOB _iris_media_control_runtime_dlls
+          "${_iris_media_control_runtime_dir}/avcodec-*.dll"
+          "${_iris_media_control_runtime_dir}/avutil-*.dll"
+          "${_iris_media_control_runtime_dir}/swresample-*.dll"
+          "${_iris_media_control_runtime_dir}/swscale-*.dll"
+          "${_iris_media_control_runtime_dir}/openh264-*.dll"
+          "${_iris_media_control_runtime_dir}/opus.dll"
+        )
+        if(_iris_media_control_runtime_dlls)
+          add_custom_command(
+            TARGET iris-media-control-test POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${_iris_media_control_runtime_dlls}
+              $<TARGET_FILE_DIR:iris-media-control-test>
+            VERBATIM
+          )
+        endif()
+        unset(_iris_media_control_runtime_dir)
+        unset(_iris_media_ffmpeg_prefix)
+        unset(_iris_media_control_runtime_dlls)
+      endif()
+
+      add_test(
+        NAME iris-media-control-test
+        COMMAND iris-media-control-test
+      )
+    endif()
   endif()
 
   if(IRIS_MEDIA_BUILD_TRANSPORT)

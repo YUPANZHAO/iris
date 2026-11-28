@@ -89,6 +89,10 @@ void Runtime::setVideoFrameCallback(VideoFrameCallback callback) {
     impl_->setVideoFrameCallback(std::move(callback));
 }
 
+void Runtime::setAudioFrameCallback(AudioFrameCallback callback) {
+    impl_->setAudioFrameCallback(std::move(callback));
+}
+
 std::vector<AccountSnapshot> Runtime::accounts() const {
     return impl_->accounts();
 }

@@ -2,7 +2,6 @@
 
 #include "core/account_manager.h"
 #include "core/call_manager.h"
-#include "core/media_session_manager.h"
 
 #include <chrono>
 #include <stdexcept>
@@ -101,18 +100,20 @@ void RuntimeImpl::resume_call(const CallId& id) {
 
 void RuntimeImpl::set_audio_muted(const CallId& id, bool muted) {
     dispatcher_.invoke([this, id, muted] {
-        const auto result = media_sessions_->setAudioMuted(id, muted);
+        const auto result = call_manager_->set_media_muted(
+            id, MediaKind::Audio, muted);
         if (!result.ok) {
-            throw std::runtime_error(result.error);
+            throw std::runtime_error(result.message);
         }
     }).get();
 }
 
 void RuntimeImpl::set_video_muted(const CallId& id, bool muted) {
     dispatcher_.invoke([this, id, muted] {
-        const auto result = media_sessions_->setVideoMuted(id, muted);
+        const auto result = call_manager_->set_media_muted(
+            id, MediaKind::Video, muted);
         if (!result.ok) {
-            throw std::runtime_error(result.error);
+            throw std::runtime_error(result.message);
         }
     }).get();
 }
@@ -120,13 +121,13 @@ void RuntimeImpl::set_video_muted(const CallId& id, bool muted) {
 void RuntimeImpl::set_media_input(MediaKind kind,
                                   const std::string& source) {
     dispatcher_.invoke([this, kind, source] {
-        media_sessions_->setInputSource(kind, source);
+        call_manager_->set_media_input(kind, source);
     }).get();
 }
 
 std::string RuntimeImpl::media_input(MediaKind kind) const {
     return dispatcher_.invoke([this, kind] {
-        return media_sessions_->inputSource(kind);
+        return call_manager_->media_input(kind);
     }).get();
 }
 
@@ -134,7 +135,15 @@ void RuntimeImpl::setVideoFrameCallback(
     VideoFrameCallback callback) {
     dispatcher_.invoke(
         [this, callback = std::move(callback)] {
-            media_sessions_->setVideoFrameCallback(callback);
+            call_manager_->set_video_frame_callback(callback);
+        }).get();
+}
+
+void RuntimeImpl::setAudioFrameCallback(
+    AudioFrameCallback callback) {
+    dispatcher_.invoke(
+        [this, callback = std::move(callback)] {
+            call_manager_->set_audio_frame_callback(callback);
         }).get();
 }
 
@@ -152,7 +161,7 @@ std::vector<CallSnapshot> RuntimeImpl::calls() const {
 
 MediaStats RuntimeImpl::media_stats(const CallId& id) const {
     return dispatcher_.invoke([this, id] {
-        return media_sessions_->stats(id);
+        return call_manager_->media_stats(id);
     }).get();
 }
 
@@ -199,13 +208,11 @@ void RuntimeImpl::accept_incoming_call(sip::PjAccount& account,
 
 void RuntimeImpl::initialize() {
     endpoint_.initialize(config_);
-    media_sessions_ = std::make_unique<core::MediaSessionManager>(
-        std::move(config_.media));
     account_manager_ =
         std::make_unique<core::AccountManager>(*this, *this);
     call_manager_ =
         std::make_unique<core::CallManager>(
-            *this, *account_manager_, *media_sessions_);
+            *this, *account_manager_, std::move(config_.media));
 }
 
 void RuntimeImpl::shutdown() noexcept {
@@ -240,12 +247,8 @@ void RuntimeImpl::shutdown() noexcept {
             if (account_manager_) {
                 account_manager_->clear();
             }
-            if (media_sessions_) {
-                media_sessions_->stopAll();
-            }
 
             call_manager_.reset();
-            media_sessions_.reset();
             account_manager_.reset();
             endpoint_.shutdown();
         }).get();

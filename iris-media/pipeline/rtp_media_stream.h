@@ -7,6 +7,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace iris::media::pipeline {
 
@@ -53,6 +54,8 @@ public:
 private:
     MediaKind mediaKind_ = MediaKind::Unknown;
     std::shared_ptr<transport::RTPTransport> transport_;
+    std::vector<std::uint8_t> h264AccessUnit_;
+    bool h264FragmentInProgress_ = false;
 };
 
 } // namespace iris::media::pipeline

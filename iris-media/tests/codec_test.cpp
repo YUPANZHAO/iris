@@ -184,7 +184,7 @@ void testFactory() {
 void testStatusFailure() {
     const auto defaultFailure = Status::failure("default failure");
     require(!defaultFailure.ok, "failure status is not successful");
-    require(defaultFailure.code == 1,
+    require(defaultFailure.code == -1,
             "failure status uses the default error code");
     require(defaultFailure.message == "default failure",
             "failure status preserves the message");

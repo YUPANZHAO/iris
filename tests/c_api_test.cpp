@@ -24,7 +24,7 @@ int main() {
     iris_bridge_runtime* runtime = nullptr;
     char* error = nullptr;
     const auto create_status = iris_bridge_runtime_create(
-        R"({"sipPort":0,"logLevel":0,"media":{"audioEnabled":false,"videoEnabled":false,"renderAudio":false,"renderVideo":false}})",
+        R"({"sipPort":0,"logLevel":0,"media":{"audioEnabled":false,"videoEnabled":false}})",
         &runtime,
         &error);
     if (!expect(create_status == 0, take_string(error).c_str()) ||

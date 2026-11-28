@@ -2,6 +2,7 @@
 
 #include "core/account_manager.h"
 #include "core/runtime_services.h"
+#include "iris/media.h"
 #include "sip/pj_call.h"
 
 #include <atomic>
@@ -15,13 +16,13 @@
 
 namespace iris::core {
 
-class MediaSessionManager;
+class MediaSession;
 
 class CallManager final : public sip::CallCallbackHandler {
 public:
     CallManager(RuntimeServices& services,
                 AccountManager& accounts,
-                MediaSessionManager& media);
+                MediaRuntimeConfig mediaConfig);
     ~CallManager() override;
 
     CallManager(const CallManager&) = delete;
@@ -37,6 +38,21 @@ public:
 
     std::vector<CallSnapshot> calls() const;
     bool has_active_call_for(const AccountId& account_id) const;
+    void set_media_input(MediaKind kind, const std::string& source);
+    std::string media_input(MediaKind kind) const;
+    void set_audio_frame_callback(AudioFrameCallback callback);
+    void set_video_frame_callback(VideoFrameCallback callback);
+    media::Status set_media_muted(const CallId& id,
+                                  MediaKind kind,
+                                  bool muted);
+    MediaStats media_stats(const CallId& id) const;
+
+    bool audio_enabled() const noexcept {
+        return mediaConfig_.audioEnabled;
+    }
+    bool video_enabled() const noexcept {
+        return mediaConfig_.videoEnabled;
+    }
 
     // Called from a PJSUA2 callback thread. The call adapter is created
     // immediately, while map and lifecycle mutation is posted to the core.
@@ -60,9 +76,12 @@ private:
         std::shared_ptr<sip::PjCall> adapter;
         CallSnapshot snapshot;
         std::string answerSdp;
+        std::shared_ptr<MediaSession> media;
         bool remoteMediaApplied = false;
         PendingOperation pendingOperation = PendingOperation::None;
     };
+
+    struct MediaCallbackState;
 
     void call_state_changed(CallId id,
                             const pj::CallInfo& info) override;
@@ -85,10 +104,14 @@ private:
     void publish_call_event(const CallSnapshot& snapshot,
                             const std::string& reason,
                             int status_code);
+    std::shared_ptr<MediaSession> create_media(
+        const CallId& id,
+        const std::string& localUri);
 
     RuntimeServices& services_;
     AccountManager& accounts_;
-    MediaSessionManager& media_;
+    MediaRuntimeConfig mediaConfig_;
+    std::shared_ptr<MediaCallbackState> mediaCallbacks_;
     std::unordered_map<std::string, CallRecord> calls_;
     std::atomic<std::uint64_t> next_call_id_{0};
     std::atomic<std::size_t> call_count_{0};

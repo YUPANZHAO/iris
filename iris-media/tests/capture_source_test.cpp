@@ -1,6 +1,7 @@
 #include "capture_source/capture.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -29,6 +30,18 @@ bool waitUntilStopped(const Source& source) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return !source.running();
+}
+
+template <typename Collector>
+bool waitForFrames(const Collector& collector,
+                   std::size_t count) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (collector.size() < count &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return collector.size() >= count;
 }
 
 class AudioCollector final : public AudioFrameSink {
@@ -189,6 +202,86 @@ void testStop() {
             "stop terminates an unbounded video source");
 }
 
+void testEmptyAudioCapture() {
+    auto source = std::make_shared<EmptyAudioCaptureSource>("silence");
+    auto collector = std::make_shared<AudioCollector>();
+    source->setFrameSink(collector);
+
+    AudioCaptureConfig config;
+    config.outputFormat.sampleRate = 8000;
+    config.outputFormat.channels = 1;
+    config.outputFormat.sampleFormat =
+        iris::media::codec::AudioSampleFormat::Signed16;
+    require(source->configure(config).ok,
+            "empty audio source configures");
+    require(source->start().ok, "empty audio source starts");
+    require(waitForFrames(*collector, 1),
+            "empty audio source emits a frame");
+    source->stop();
+
+    const auto frame = collector->front();
+    require(frame.format.sampleRate == 8000 &&
+                frame.format.channels == 1,
+            "empty audio source preserves the requested format");
+    bool silent = frame.samples && frame.samples->size() > 0;
+    if (silent) {
+        const auto* samples = static_cast<const std::uint8_t*>(
+            frame.samples->data());
+        for (std::size_t index = 0;
+             index < frame.samples->size();
+             ++index) {
+            silent = silent && samples[index] == 0;
+        }
+    }
+    require(silent, "empty audio source emits silence");
+}
+
+void testEmptyVideoCapture() {
+    auto source =
+        std::make_shared<EmptyVideoCaptureSource>("Iris 100");
+    auto collector = std::make_shared<VideoCollector>();
+    source->setFrameSink(collector);
+
+    VideoCaptureConfig config;
+    config.outputFormat.width = 160;
+    config.outputFormat.height = 90;
+    config.outputFormat.frameRate =
+        iris::media::codec::Rational{10, 1};
+    config.outputFormat.pixelFormat =
+        iris::media::codec::VideoPixelFormat::BGRA;
+    require(source->configure(config).ok,
+            "empty video source configures");
+    require(source->start().ok, "empty video source starts");
+    require(waitForFrames(*collector, 1),
+            "empty video source emits a frame");
+    source->stop();
+
+    const auto frame = collector->front();
+    require(frame.pixels &&
+                frame.pixels->size() == 160 * 90 * 4,
+            "empty video source emits a BGRA frame");
+    const auto* pixels = static_cast<const std::uint8_t*>(
+        frame.pixels->data());
+    std::size_t whitePixels = 0;
+    std::size_t darkPixels = 0;
+    for (std::size_t offset = 0;
+         offset < frame.pixels->size();
+         offset += 4) {
+        if (pixels[offset] >= 240 &&
+            pixels[offset + 1] >= 240 &&
+            pixels[offset + 2] >= 240) {
+            ++whitePixels;
+        }
+        if (pixels[offset] < 64 &&
+            pixels[offset + 1] < 64 &&
+            pixels[offset + 2] < 64) {
+            ++darkPixels;
+        }
+    }
+    require(whitePixels > 0 && darkPixels > 0,
+            "empty video source draws white text on a dark canvas");
+}
+
 } // namespace
 
 int main() {
@@ -200,6 +293,8 @@ int main() {
     static_assert(std::is_abstract_v<VideoCaptureSource>);
     static_assert(!std::is_abstract_v<FFmpegAudioCaptureSource>);
     static_assert(!std::is_abstract_v<FFmpegVideoCaptureSource>);
+    static_assert(!std::is_abstract_v<EmptyAudioCaptureSource>);
+    static_assert(!std::is_abstract_v<EmptyVideoCaptureSource>);
     static_assert(std::is_base_of_v<
                   AudioCaptureSource, FFmpegAudioCaptureSource>);
     static_assert(std::is_base_of_v<
@@ -209,6 +304,8 @@ int main() {
     testVideoCapture();
     testAudioCapture();
     testStop();
+    testEmptyAudioCapture();
+    testEmptyVideoCapture();
     std::cout << "iris-media capture source tests passed\n";
     return EXIT_SUCCESS;
 }

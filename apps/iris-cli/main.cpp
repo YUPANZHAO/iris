@@ -1,4 +1,5 @@
 #include "iris/iris.h"
+#include "renderer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -64,6 +65,7 @@ void print_help() {
         << "  media source\n"
         << "  media source audio <index|id|auto|null>\n"
         << "  media source video <index|id|auto|null>\n"
+        << "  media render on|off|status\n"
         << "  events\n"
         << "  help\n"
         << "  quit\n";
@@ -200,15 +202,26 @@ int self_test(const iris::RuntimeConfig& config) {
     return 0;
 }
 
-int repl(const iris::RuntimeConfig& config) {
+int repl(const iris::RuntimeConfig& config, bool renderEnabled) {
+    MediaRenderer renderer(renderEnabled);
     iris::Runtime runtime(config);
+    runtime.setAudioFrameCallback(
+        [&renderer](const iris::AudioFrameView& frame) {
+            renderer.onAudioFrame(frame);
+        });
+    runtime.setVideoFrameCallback(
+        [&renderer](const iris::VideoFrameView& frame) {
+            renderer.onVideoFrame(frame);
+        });
     std::cout << "Iris CLI " << runtime.version()
               << " (pjproject " << runtime.pjprojectVersion() << ")\n"
               << "SIP UDP port: " << runtime.sipPort() << "\n"
               << "media audio=" << (config.media.audioEnabled ? "on" : "off")
               << " video=" << (config.media.videoEnabled ? "on" : "off")
               << " source=" << config.media.audioInput << " / "
-              << config.media.videoInput << "\n"
+              << config.media.videoInput
+              << " render=" << (renderer.enabled() ? "on" : "off")
+              << "\n"
               << "Type 'help' for commands.\n";
 
     std::atomic<bool> auto_answer_stop{false};
@@ -359,6 +372,19 @@ int repl(const iris::RuntimeConfig& config) {
                 runtime.setMediaInput(iris::MediaKind::Video, tokens[3]);
                 std::cout << "video source set to " << tokens[3]
                           << " for subsequent calls\n";
+            } else if (command == "media" && tokens.size() == 3 &&
+                       tokens[1] == "render" &&
+                       (tokens[2] == "on" || tokens[2] == "off")) {
+                renderer.set_enabled(tokens[2] == "on");
+                std::cout << "render "
+                          << (renderer.enabled() ? "enabled" : "disabled")
+                          << '\n';
+            } else if (command == "media" && tokens.size() == 3 &&
+                       tokens[1] == "render" &&
+                       tokens[2] == "status") {
+                std::cout << "render "
+                          << (renderer.enabled() ? "on" : "off")
+                          << '\n';
             } else {
                 std::cout << "Unknown or incomplete command. Type 'help'.\n";
             }
@@ -383,6 +409,7 @@ int main(int argc, char* argv[]) {
     iris::RuntimeConfig config;
     bool run_self_test = false;
     bool list_devices = false;
+    bool render_enabled = false;
 
     try {
         for (int index = 1; index < argc; ++index) {
@@ -391,6 +418,8 @@ int main(int argc, char* argv[]) {
                 run_self_test = true;
             } else if (argument == "--list-devices") {
                 list_devices = true;
+            } else if (argument == "--render") {
+                render_enabled = true;
             } else if (argument == "--help" || argument == "-h") {
                 std::cout
                     << "Usage: iris-cli [--self-test] [--sip-port PORT] "
@@ -398,7 +427,8 @@ int main(int argc, char* argv[]) {
                        "[--video-input SOURCE] [--audio-device SELECTOR] "
                        "[--video-device SELECTOR] [--list-devices] "
                        "[--media-address ADDRESS] "
-                       "[--no-audio] [--no-video] [--auto-answer]\n";
+                       "[--no-audio] [--no-video] [--render] "
+                       "[--auto-answer]\n";
                 return 0;
             } else if (argument == "--sip-port" && index + 1 < argc) {
                 config.sipPort = static_cast<unsigned>(
@@ -431,10 +461,6 @@ int main(int argc, char* argv[]) {
                 config.media.audioEnabled = false;
             } else if (argument == "--no-video") {
                 config.media.videoEnabled = false;
-            } else if (argument == "--no-audio-render") {
-                config.media.renderAudio = false;
-            } else if (argument == "--no-video-render") {
-                config.media.renderVideo = false;
             } else if (argument == "--auto-answer") {
                 config.autoAnswerCalls = true;
             } else {
@@ -457,7 +483,7 @@ int main(int argc, char* argv[]) {
         if (run_self_test) {
             return self_test(config);
         }
-        return repl(config);
+        return repl(config, render_enabled);
     } catch (const std::exception& error) {
         std::cerr << "fatal: " << error.what() << '\n';
         return 1;

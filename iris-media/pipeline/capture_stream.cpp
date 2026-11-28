@@ -60,7 +60,7 @@ void CaptureAudioStream::close() noexcept {
 
 void CaptureAudioStream::onAudioFrame(
     const codec::AudioRawFrame& frame) {
-    if (encoder_) {
+    if (encoder_ && !muted_.load(std::memory_order_relaxed)) {
         (void)encoder_->encode(frame);
     }
 }
@@ -123,9 +123,23 @@ void CaptureVideoStream::close() noexcept {
 
 void CaptureVideoStream::onVideoFrame(
     const codec::VideoRawFrame& frame) {
-    if (encoder_) {
+    std::shared_ptr<codec::IVideoFrameSink> preview;
+    {
+        std::lock_guard<std::mutex> lock(previewMutex_);
+        preview = previewSink_.lock();
+    }
+    if (preview) {
+        preview->onVideoFrame(frame);
+    }
+    if (encoder_ && !muted_.load(std::memory_order_relaxed)) {
         (void)encoder_->encode(frame);
     }
+}
+
+void CaptureVideoStream::setPreviewSink(
+    std::weak_ptr<codec::IVideoFrameSink> sink) noexcept {
+    std::lock_guard<std::mutex> lock(previewMutex_);
+    previewSink_ = std::move(sink);
 }
 
 } // namespace iris::media::pipeline

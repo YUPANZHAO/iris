@@ -14,12 +14,7 @@ using CodecType = ::iris::media::codec::CodecType;
 using MediaKind = ::iris::media::MediaKind;
 using Status = ::iris::media::Status;
 
-enum class SdpDirection {
-    Inactive,
-    SendOnly,
-    RecvOnly,
-    SendRecv,
-};
+using SdpDirection = ::iris::media::MediaDirection;
 
 struct SdpOrigin {
     std::string username = "-";

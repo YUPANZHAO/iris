@@ -9,11 +9,13 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace iris::media::codec {
 namespace {
@@ -117,30 +119,61 @@ struct FFmpegOpusEncoder::Impl {
             format.channels != inputFormat.channels) {
             return Status::failure("invalid Opus signed-16 input frame");
         }
-        const auto samples =
-            static_cast<int>(size / bytesPerSample);
-        frame->format = AV_SAMPLE_FMT_S16;
-        frame->sample_rate = format.sampleRate;
-        av_channel_layout_default(&frame->ch_layout, format.channels);
-        frame->nb_samples = samples;
-        frame->pts = audio.ptsMicros;
-        frame->data[0] = const_cast<std::uint8_t*>(data);
-        frame->linesize[0] = static_cast<int>(bytesPerSample);
         lastPts = audio.ptsMicros;
         lastStreamId = audio.streamId;
-        const auto status = avcodec_send_frame(context, frame);
-        if (status < 0) {
-            errors.fetch_add(1);
-            return Status::failure(
-                "failed to submit Opus frame: " +
-                ffmpegError(status));
+        if (pending.empty()) {
+            pendingPtsMicros = audio.ptsMicros;
         }
-        return drain();
+        pending.insert(pending.end(), data, data + size);
+
+        const auto frameSamples = std::max(1, context->frame_size);
+        const auto frameBytes =
+            static_cast<std::size_t>(frameSamples) * bytesPerSample;
+        std::size_t offset = 0;
+        while (pending.size() - offset >= frameBytes) {
+            auto status = sendFrame(
+                pending.data() + offset,
+                frameSamples,
+                bytesPerSample,
+                pendingPtsMicros);
+            if (!status.ok) {
+                return status;
+            }
+            offset += frameBytes;
+            pendingPtsMicros +=
+                static_cast<std::int64_t>(frameSamples) * 1000000 /
+                format.sampleRate;
+        }
+        if (offset != 0) {
+            pending.erase(
+                pending.begin(),
+                pending.begin() + static_cast<std::ptrdiff_t>(offset));
+        }
+        return {};
     }
 
     Status flush() {
         if (!context) {
             return {};
+        }
+        if (!pending.empty()) {
+            const auto bytesPerSample =
+                static_cast<std::size_t>(inputFormat.channels) *
+                sizeof(std::int16_t);
+            const auto frameSamples =
+                std::max(1, context->frame_size);
+            const auto frameBytes =
+                static_cast<std::size_t>(frameSamples) * bytesPerSample;
+            pending.resize(frameBytes, 0);
+            const auto submitted = sendFrame(
+                pending.data(),
+                frameSamples,
+                bytesPerSample,
+                pendingPtsMicros);
+            pending.clear();
+            if (!submitted.ok) {
+                return submitted;
+            }
         }
         const auto status = avcodec_send_frame(context, nullptr);
         if (status < 0 && status != AVERROR_EOF) {
@@ -157,7 +190,39 @@ struct FFmpegOpusEncoder::Impl {
         avcodec_free_context(&context);
         lastPts = 0;
         lastStreamId = 0;
+        pending.clear();
+        pendingPtsMicros = 0;
         inputFormat = {};
+    }
+
+    Status sendFrame(
+        const std::uint8_t* data,
+        int samples,
+        std::size_t bytesPerSample,
+        std::int64_t ptsMicros) {
+        frame->format = AV_SAMPLE_FMT_S16;
+        frame->sample_rate = inputFormat.sampleRate;
+        av_channel_layout_default(
+            &frame->ch_layout, inputFormat.channels);
+        frame->nb_samples = samples;
+        frame->pts = ptsMicros;
+        frame->data[0] = const_cast<std::uint8_t*>(data);
+        frame->linesize[0] = static_cast<int>(bytesPerSample);
+        auto status = avcodec_send_frame(context, frame);
+        if (status == AVERROR(EAGAIN)) {
+            const auto drained = drain();
+            if (!drained.ok) {
+                return drained;
+            }
+            status = avcodec_send_frame(context, frame);
+        }
+        if (status < 0) {
+            errors.fetch_add(1);
+            return Status::failure(
+                "failed to submit Opus frame: " +
+                ffmpegError(status));
+        }
+        return drain();
     }
 
     void emit(const std::uint8_t* data,
@@ -215,6 +280,8 @@ struct FFmpegOpusEncoder::Impl {
     AVPacket* packet = nullptr;
     std::int64_t lastPts = 0;
     StreamId lastStreamId = 0;
+    std::vector<std::uint8_t> pending;
+    std::int64_t pendingPtsMicros = 0;
     AudioFormat inputFormat;
 };
 

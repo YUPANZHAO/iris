@@ -9,14 +9,15 @@ Iris 是一款跨平台 SIP 会议核心。当前阶段已经完成 `libiris` �
 ```text
 include/iris/       公共 API，不暴露 PJSUA2 或 FFmpeg 类型
 src/api/            Runtime 公共门面
-src/core/           Runtime、账户、呼叫及任务调度
+src/core/           Runtime、账户、呼叫、任务调度及媒体业务适配
 src/sip/            PJSUA2 Endpoint、Account、Call 和状态适配器
-src/media/engine/          媒体会话状态机与稳定接口
-src/media/sdp/             SDP 策略、PJPROJECT 解析适配和 CodecRegistry
-src/media/pipeline/        CaptureSource/Encoder 接口、FrameView 和 packetizer
-src/media/transport/       PJLIB ioqueue、UDP RTP/RTCP 和基础 RTP 封装
-src/media/backend/ffmpeg/  FFmpeg 采集、转换、编码和测试媒体源
-src/media/render/          Win32/WinMM 原生音视频渲染
+iris-media/engine/         任务队列、内存池和基础执行原语
+iris-media/sdp/            SDP 构建、解析与协商
+iris-media/codec/          FFmpeg Opus/H.264 编解码
+iris-media/capture_source/ 设备与空文本采集源
+iris-media/pipeline/       采集编码流和 RTP 媒体流
+iris-media/transport/      UDP/RTPEngine
+iris-media/control/        MediaControl 与 SdpMediaControl
 apps/iris-cli/      命令行测试客户端
 apps/iris-ui/       Windows NSH Rust 图形客户端
 tests/              库、接口编解码和媒体回环测试
@@ -92,8 +93,13 @@ pjproject 的源码内容不需要上传到 Iris 主仓库，也不应作为普�
   --media-address 127.0.0.1 `
   --audio-input "lavfi:sine=frequency=440:sample_rate=48000" `
   --video-input "lavfi:testsrc=size=640x360:rate=15" `
+  --render `
   --video-width 640 --video-height 360 --video-fps 15
 ```
+
+`--render` 会打开原生视频窗口，并通过 WaveOut 播放远端音频。运行中也
+可以用 `media render on`、`media render off` 或 `media render status`
+控制渲染。
 
 真实设备使用 FFmpeg 设备字符串，例如：
 
@@ -104,8 +110,7 @@ pjproject 的源码内容不需要上传到 Iris 主仓库，也不应作为普�
 
 不指定输入时，程序选择 DirectShow 默认音频/视频设备；找不到设备时会明确
 返回错误。无真实设备的环境可显式使用 `lavfi:` 测试源。
-`--no-audio-render` 和 `--no-video-render` 可关闭原生播放，`--auto-answer`
-可用于无人值守测试。
+`--auto-answer` 可用于无人值守测试。
 
 查看当前可用的麦克风和摄像头：
 

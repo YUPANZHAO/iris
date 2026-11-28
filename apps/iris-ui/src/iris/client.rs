@@ -180,8 +180,6 @@ fn run_service(
             "media": {
                 "audioEnabled": true,
                 "videoEnabled": true,
-                "renderAudio": true,
-                "renderVideo": false,
                 "mediaAddress": media_address,
                 "audioInput": "auto",
                 "videoInput": "auto",

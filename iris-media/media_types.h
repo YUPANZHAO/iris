@@ -21,6 +21,13 @@ enum class MediaKind {
     Video,
 };
 
+enum class MediaDirection {
+    Inactive,
+    SendOnly,
+    RecvOnly,
+    SendRecv,
+};
+
 struct Status {
     bool ok = true;
     int code = 0;

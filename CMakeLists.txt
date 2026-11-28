@@ -56,21 +56,10 @@ add_library(iris STATIC
   src/api/runtime.cpp
   src/core/account_manager.cpp
   src/core/call_manager.cpp
-  src/core/media_session_manager.cpp
+  src/core/media_device_query.cpp
+  src/core/media_session.cpp
   src/core/runtime_impl.cpp
   src/core/task_dispatcher.cpp
-  src/media/capture/ffmpeg_capture.cpp
-  src/media/capture/device_query.cpp
-  src/media/codec/ffmpeg_codec_factory.cpp
-  src/media/codec/ffmpeg_h264_codec.cpp
-  src/media/codec/ffmpeg_opus_codec.cpp
-  src/media/control/media_control.cpp
-  src/media/control/sdp_media_control.cpp
-  src/media/engine/media_buffer.cpp
-  src/media/sdp/sdp_components.cpp
-  src/media/stream/audio_stream.cpp
-  src/media/stream/video_stream.cpp
-  src/media/transport/rtp_transport.cpp
   src/sip/pj_account.cpp
   src/sip/pj_call.cpp
   src/sip/pj_endpoint.cpp
@@ -92,6 +81,7 @@ target_compile_definitions(iris
   PRIVATE
     IRIS_VERSION="${PROJECT_VERSION}"
 )
+target_link_libraries(iris PUBLIC iris::media::control)
 
 if(IRIS_WITH_MEDIA)
   target_compile_definitions(iris PRIVATE IRIS_HAS_MEDIA=1)
@@ -134,6 +124,7 @@ if(WIN32 AND IRIS_WITH_MEDIA)
     "${_iris_runtime_dll_dir}/libcrypto-*.dll"
     "${_iris_runtime_dll_dir}/openh264-*.dll"
     "${_iris_runtime_dll_dir}/opus.dll"
+    "${_iris_runtime_dll_dir}/boost_container-*.dll"
   )
   function(iris_copy_vcpkg_runtime target)
     if(_iris_runtime_dlls)
@@ -165,9 +156,16 @@ if(IRIS_BUILD_UI_BRIDGE)
 endif()
 
 if(IRIS_BUILD_CLI)
-  add_executable(iris-cli apps/iris-cli/main.cpp)
+  add_executable(iris-cli
+    apps/iris-cli/main.cpp
+    apps/iris-cli/renderer.cpp
+  )
   target_compile_features(iris-cli PRIVATE cxx_std_17)
   target_link_libraries(iris-cli PRIVATE iris::iris)
+  if(WIN32)
+    target_link_libraries(
+      iris-cli PRIVATE winmm gdi32 user32)
+  endif()
   if(WIN32 AND CMAKE_CONFIGURATION_TYPES)
     set_target_properties(iris-cli PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
@@ -205,24 +203,11 @@ if(IRIS_BUILD_TESTS)
   target_compile_features(iris-media-interface-compile PRIVATE cxx_std_17)
   target_include_directories(iris-media-interface-compile PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
+  target_link_libraries(
+    iris-media-interface-compile PRIVATE iris::media::control)
   add_test(NAME iris-media-interface-compile
     COMMAND iris-media-interface-compile)
-
-  add_executable(iris-media-v2-test
-    tests/media_v2_test.cpp
-  )
-  target_compile_features(iris-media-v2-test PRIVATE cxx_std_17)
-  target_include_directories(iris-media-v2-test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
-  target_link_libraries(iris-media-v2-test PRIVATE iris::iris)
-  if(WIN32 AND IRIS_WITH_MEDIA)
-    iris_copy_vcpkg_runtime(iris-media-v2-test)
-  endif()
-  add_test(NAME iris-media-v2-test COMMAND iris-media-v2-test)
 
   add_executable(iris-media-sources-test tests/media_sources_test.cpp)
   target_compile_features(iris-media-sources-test PRIVATE cxx_std_17)
@@ -264,6 +249,15 @@ if(IRIS_BUILD_TESTS)
           -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/sip_e2e_test.ps1"
           -CliPath "$<TARGET_FILE:iris-cli>")
       set_tests_properties(iris-sip-e2e PROPERTIES
+        TIMEOUT 30
+        LABELS integration)
+      add_test(NAME iris-cli-empty-source-e2e
+        COMMAND "${IRIS_POWERSHELL_EXECUTABLE}"
+          -NoProfile
+          -ExecutionPolicy Bypass
+          -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_empty_source_e2e.ps1"
+          -CliPath "$<TARGET_FILE:iris-cli>")
+      set_tests_properties(iris-cli-empty-source-e2e PROPERTIES
         TIMEOUT 30
         LABELS integration)
     endif()

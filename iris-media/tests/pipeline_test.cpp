@@ -1,5 +1,6 @@
 #include "pipeline/pipeline.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
@@ -55,10 +56,12 @@ public:
     void detach() noexcept override {
     }
 
-    void receive(const codec::EncodedPacket& packet) {
+    void receive(
+        const codec::EncodedPacket& packet,
+        bool marker = false) {
         const auto sink = sink_.lock();
         require(static_cast<bool>(sink), "RTP stream is connected");
-        sink->onRtpRecv(transport::RtpParams{}, packet);
+        sink->onRtpRecv(transport::RtpParams{marker}, packet);
     }
 
     bool hasSink() const noexcept {
@@ -325,6 +328,7 @@ void testVideoPipeline() {
 
 void testRtpStreams() {
     const std::uint8_t payload[] = {0x12, 0x34, 0x56};
+    const std::uint8_t videoPayload[] = {0x65, 0x34, 0x56};
 
     auto audio = std::make_shared<pipeline::RtpMediaStream>(
         MediaKind::Audio);
@@ -367,20 +371,67 @@ void testRtpStreams() {
     videoPacket.streamId = 22;
     videoPacket.codecType = CodecType::H264;
     videoPacket.data = std::make_shared<ByteBuffer>(
-        payload, sizeof(payload));
-    videoTransport->receive(videoPacket);
+        videoPayload, sizeof(videoPayload));
+    videoTransport->receive(videoPacket, true);
     require(videoCollector->count == 1 &&
                 videoCollector->kind == MediaKind::Video,
             "RTP video stream publishes video packets");
     require(videoCollector->lastPacket.streamId == 22 &&
                 videoCollector->lastPacket.codecType == CodecType::H264 &&
                 videoCollector->lastPacket.data &&
-                videoCollector->lastPacket.data->size() == sizeof(payload),
+                videoCollector->lastPacket.data->size() == 7,
             "RTP video stream preserves the processed payload");
 
     video->close();
     require(!videoTransport->hasSink(),
             "closing disconnects the RTP video stream");
+}
+
+void testH264ParameterSetsSurviveFuA() {
+    auto stream = std::make_shared<pipeline::RtpMediaStream>(
+        MediaKind::Video);
+    auto transport = std::make_shared<MockRtpTransport>();
+    auto collector = std::make_shared<PacketCollector>();
+    require(stream->setRTPTransport(transport).ok,
+            "H.264 RTP transport is accepted");
+    stream->setEncodedPacketSink(collector);
+    require(stream->open().ok, "H.264 RTP stream opens");
+
+    const auto receive = [&](std::initializer_list<std::uint8_t> bytes,
+                             bool marker = false) {
+        EncodedPacket packet;
+        packet.streamId = 22;
+        packet.codecType = CodecType::H264;
+        packet.data = std::make_shared<ByteBuffer>(bytes.begin(), bytes.size());
+        transport->receive(packet, marker);
+    };
+
+    receive({0x67, 0xaa});
+    receive({0x68, 0xbb});
+    receive({0x7c, 0x85, 0x11});
+    receive({0x7c, 0x05, 0x22});
+    receive({0x7c, 0x45, 0x33}, true);
+
+    require(collector->count == 1,
+            "one H.264 access unit is emitted after the marker");
+    require(collector->lastPacket.key,
+            "a fragmented IDR access unit remains a key frame");
+    const std::uint8_t expected[] = {
+        0, 0, 0, 1, 0x67, 0xaa,
+        0, 0, 0, 1, 0x68, 0xbb,
+        0, 0, 0, 1, 0x65, 0x11, 0x22, 0x33,
+    };
+    const auto* actual = static_cast<const std::uint8_t*>(
+        collector->lastPacket.data->data());
+    require(
+        collector->lastPacket.data->size() == sizeof(expected) &&
+            std::equal(
+                actual,
+                actual + sizeof(expected),
+                std::begin(expected)),
+        "SPS, PPS and fragmented IDR share one access unit");
+
+    stream->close();
 }
 
 } // namespace
@@ -389,6 +440,7 @@ int main() {
     testAudioPipeline();
     testVideoPipeline();
     testRtpStreams();
+    testH264ParameterSetsSurviveFuA();
     std::cout << "pipeline tests passed\n";
     return EXIT_SUCCESS;
 }

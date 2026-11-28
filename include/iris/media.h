@@ -1,6 +1,9 @@
 #pragma once
 
+#include "capture_source/device_query.h"
+#include "codec/codec_types.h"
 #include "iris/types.h"
+#include "media_types.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -10,62 +13,17 @@
 
 namespace iris {
 
-enum class MediaKind {
-    Audio,
-    Video,
-};
-
-enum class MediaDirection {
-    Inactive,
-    SendOnly,
-    RecvOnly,
-    SendRecv,
-};
-
-enum class MediaSessionState {
-    Idle,
-    Preparing,
-    Negotiating,
-    Starting,
-    Active,
-    Reconfiguring,
-    Stopping,
-    Stopped,
-    Failed,
-};
+using MediaKind = media::MediaKind;
+using MediaDirection = media::MediaDirection;
+using AudioSampleFormat = media::codec::AudioSampleFormat;
+using VideoPixelFormat = media::codec::VideoPixelFormat;
+using Rational = media::codec::Rational;
+using AudioFormat = media::codec::AudioFormat;
+using VideoFormat = media::codec::VideoFormat;
 
 enum class VideoFrameKind {
     Remote,
     LocalPreview,
-};
-
-enum class AudioSampleFormat {
-    Signed16,
-    Float32,
-};
-
-enum class VideoPixelFormat {
-    I420,
-    NV12,
-    BGRA,
-};
-
-struct Rational {
-    int numerator = 0;
-    int denominator = 1;
-};
-
-struct AudioFormat {
-    int sampleRate = 0;
-    int channels = 0;
-    AudioSampleFormat sampleFormat = AudioSampleFormat::Signed16;
-};
-
-struct VideoFormat {
-    int width = 0;
-    int height = 0;
-    Rational frameRate;
-    VideoPixelFormat pixelFormat = VideoPixelFormat::I420;
 };
 
 struct MediaCodecPreference {
@@ -74,22 +32,12 @@ struct MediaCodecPreference {
     int clockRate = 0;
     int channels = 0;
     int payloadType = -1;
-    std::string id;
     std::string fmtp;
-};
-
-struct MediaDeviceConfig {
-    std::string audioCaptureId;
-    std::string audioRenderId;
-    std::string videoCaptureId;
-    std::string videoRenderId;
 };
 
 struct MediaRuntimeConfig {
     bool audioEnabled = true;
     bool videoEnabled = true;
-    bool renderAudio = true;
-    bool renderVideo = true;
     std::string mediaAddress = "auto";
     std::string audioInput = "auto";
     std::string videoInput = "auto";
@@ -101,12 +49,7 @@ struct MediaRuntimeConfig {
     int videoFps = 15;
 };
 
-struct MediaDeviceInfo {
-    MediaKind kind = MediaKind::Audio;
-    std::string id;
-    std::string name;
-    bool isDefault = false;
-};
+using MediaDeviceInfo = media::capture::CaptureDeviceInfo;
 
 struct MediaDeviceCatalog {
     std::vector<MediaDeviceInfo> devices;
@@ -118,33 +61,6 @@ struct MediaDeviceCatalog {
 // Enumerates the platform capture devices available to the FFmpeg backend.
 // Device ids can be passed to Runtime::setMediaInput() or iris-cli.
 MediaDeviceCatalog queryMediaDevices(MediaKind kind);
-
-struct MediaSessionConfig {
-    CallId callId;
-    std::string localUri;
-    bool audioEnabled = true;
-    bool videoEnabled = true;
-    MediaDirection audioDirection = MediaDirection::SendRecv;
-    MediaDirection videoDirection = MediaDirection::SendRecv;
-    AudioFormat audioFormat;
-    VideoFormat videoFormat;
-    MediaDeviceConfig devices;
-    std::vector<MediaCodecPreference> codecPreferences;
-};
-
-struct NegotiatedMediaStream {
-    MediaKind kind = MediaKind::Audio;
-    std::string mid;
-    std::string encoding;
-    int clockRate = 0;
-    int channels = 0;
-    int payloadType = -1;
-    MediaDirection direction = MediaDirection::Inactive;
-
-    // RTCP multiplexing, RTX, SSRC and RTP header extensions will be added
-    // when the corresponding SDP/RTP milestone is implemented.
-    bool rtcpMux = false;
-};
 
 struct MediaStats {
     std::uint64_t packetsSent = 0;
@@ -172,15 +88,26 @@ struct VideoFrameView {
     std::uint64_t timestampMs = 0;
 };
 
+struct AudioFrameView {
+    CallId callId;
+    AudioFormat format;
+    const std::uint8_t* data = nullptr;
+    std::size_t size = 0;
+    std::int64_t ptsMicros = 0;
+};
+
 // Called on a media decode/capture thread. The frame bytes are valid only
 // for the duration of the call; consumers that retain a frame must copy it.
 using VideoFrameCallback =
     std::function<void(const VideoFrameView& frame)>;
+using AudioFrameCallback =
+    std::function<void(const AudioFrameView& frame)>;
 
 inline const char* to_string(MediaKind kind) noexcept {
     switch (kind) {
     case MediaKind::Audio: return "audio";
     case MediaKind::Video: return "video";
+    case MediaKind::Unknown: return "unknown";
     }
     return "unknown";
 }
@@ -191,21 +118,6 @@ inline const char* to_string(MediaDirection direction) noexcept {
     case MediaDirection::SendOnly: return "send-only";
     case MediaDirection::RecvOnly: return "recv-only";
     case MediaDirection::SendRecv: return "send-recv";
-    }
-    return "unknown";
-}
-
-inline const char* to_string(MediaSessionState state) noexcept {
-    switch (state) {
-    case MediaSessionState::Idle: return "idle";
-    case MediaSessionState::Preparing: return "preparing";
-    case MediaSessionState::Negotiating: return "negotiating";
-    case MediaSessionState::Starting: return "starting";
-    case MediaSessionState::Active: return "active";
-    case MediaSessionState::Reconfiguring: return "reconfiguring";
-    case MediaSessionState::Stopping: return "stopping";
-    case MediaSessionState::Stopped: return "stopped";
-    case MediaSessionState::Failed: return "failed";
     }
     return "unknown";
 }

@@ -47,6 +47,7 @@ $runtimePatterns = @(
     "libcrypto-*.dll",
     "openh264-*.dll",
     "opus.dll",
+    "boost_container-*.dll",
     "iris_bridge.dll"
 )
 foreach ($pattern in $runtimePatterns) {

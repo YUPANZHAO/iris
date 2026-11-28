@@ -4,7 +4,9 @@
 
 #include "capture_source/capture_source.h"
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <type_traits>
 #include <utility>
 
@@ -49,11 +51,16 @@ public:
             std::shared_ptr<codec::AudioEncoder>(std::move(encoder)));
     }
 
+    void setMuted(bool muted) noexcept {
+        muted_.store(muted, std::memory_order_relaxed);
+    }
+
     void onAudioFrame(const codec::AudioRawFrame& frame) override;
 
 private:
     std::shared_ptr<capture::AudioCaptureSource> capture_;
     std::shared_ptr<codec::AudioEncoder> encoder_;
+    std::atomic<bool> muted_{false};
 };
 
 // Video capture-to-encoder pipeline. The capture source and encoder are
@@ -95,11 +102,21 @@ public:
             std::shared_ptr<codec::VideoEncoder>(std::move(encoder)));
     }
 
+    void setMuted(bool muted) noexcept {
+        muted_.store(muted, std::memory_order_relaxed);
+    }
+
+    void setPreviewSink(
+        std::weak_ptr<codec::IVideoFrameSink> sink) noexcept;
+
     void onVideoFrame(const codec::VideoRawFrame& frame) override;
 
 private:
+    mutable std::mutex previewMutex_;
+    std::weak_ptr<codec::IVideoFrameSink> previewSink_;
     std::shared_ptr<capture::VideoCaptureSource> capture_;
     std::shared_ptr<codec::VideoEncoder> encoder_;
+    std::atomic<bool> muted_{false};
 };
 
 } // namespace iris::media::pipeline

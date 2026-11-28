@@ -14,8 +14,6 @@ int main() {
     iris::RuntimeConfig config;
     config.media.audioInput = "null";
     config.media.videoInput = "null";
-    config.media.renderAudio = false;
-    config.media.renderVideo = false;
     iris::Runtime runtime(config);
     runtime.setMediaInput(iris::MediaKind::Audio, "null");
     runtime.setMediaInput(iris::MediaKind::Video, "null");

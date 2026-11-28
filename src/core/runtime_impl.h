@@ -20,9 +20,6 @@ class CallManager;
 }
 
 namespace iris {
-namespace core {
-class MediaSessionManager;
-}
 
 class RuntimeImpl final : public core::RuntimeServices,
                           public core::IncomingCallSink {
@@ -52,6 +49,7 @@ public:
     void set_video_muted(const CallId& id, bool muted);
     void set_media_input(MediaKind kind, const std::string& source);
     std::string media_input(MediaKind kind) const;
+    void setAudioFrameCallback(AudioFrameCallback callback);
     void setVideoFrameCallback(VideoFrameCallback callback);
 
     std::vector<AccountSnapshot> accounts() const;
@@ -75,7 +73,6 @@ private:
     mutable core::TaskDispatcher dispatcher_;
     sip::PjEndpoint endpoint_;
     std::unique_ptr<core::AccountManager> account_manager_;
-    std::unique_ptr<core::MediaSessionManager> media_sessions_;
     std::unique_ptr<core::CallManager> call_manager_;
 
     mutable std::mutex event_mutex_;

@@ -41,6 +41,7 @@ public:
     void setVideoMuted(const CallId& id, bool muted);
     void setMediaInput(MediaKind kind, const std::string& source);
     std::string mediaInput(MediaKind kind) const;
+    void setAudioFrameCallback(AudioFrameCallback callback);
     void setVideoFrameCallback(VideoFrameCallback callback);
 
     std::vector<AccountSnapshot> accounts() const;

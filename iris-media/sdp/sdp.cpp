@@ -152,6 +152,7 @@ bool isInternalMediaAttribute(const std::string& name) {
     static const std::set<std::string> names = {
         "bitrateKbps",
         "channels",
+        "displayText",
         "frameRateDenominator",
         "frameRateNumerator",
         "height",

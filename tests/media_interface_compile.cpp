@@ -1,37 +1,40 @@
-#include "media/capture/ffmpeg_capture.h"
-#include "media/codec/ffmpeg_codec_factory.h"
-#include "media/codec/ffmpeg_h264_codec.h"
-#include "media/codec/ffmpeg_opus_codec.h"
-#include "media/control/media_control_impl.h"
-#include "media/media.h"
-#include "media/sdp/sdp_components.h"
-#include "media/transport/rtp_transport.h"
+#include "capture_source/capture.h"
+#include "codec/codec.h"
+#include "control/control.h"
+#include "pipeline/pipeline.h"
+#include "transport/rtp.h"
 
 #include <type_traits>
 
-static_assert(std::is_abstract_v<iris::media::v2::IStream>);
-static_assert(std::is_abstract_v<
-              iris::media::v2::IEncodedPacketStream>);
-static_assert(std::is_abstract_v<
-              iris::media::v2::IEncodedPacketTransport>);
-static_assert(std::is_abstract_v<iris::media::v2::ICaptureSource>);
-static_assert(std::is_abstract_v<iris::media::v2::IAudioEncoder>);
-static_assert(std::is_abstract_v<iris::media::v2::IVideoEncoder>);
-static_assert(std::is_abstract_v<iris::media::v2::ICodecFactory>);
-static_assert(std::is_abstract_v<iris::media::v2::IMediaControl>);
+static_assert(std::is_abstract_v<iris::media::pipeline::Stream>);
+static_assert(std::is_abstract_v<iris::media::capture::CaptureSource>);
+static_assert(std::is_abstract_v<iris::media::capture::AudioCaptureSource>);
+static_assert(std::is_abstract_v<iris::media::capture::VideoCaptureSource>);
+static_assert(std::is_abstract_v<iris::media::codec::AudioEncoder>);
+static_assert(std::is_abstract_v<iris::media::codec::VideoEncoder>);
+static_assert(std::is_abstract_v<iris::media::codec::AudioDecoder>);
+static_assert(std::is_abstract_v<iris::media::codec::VideoDecoder>);
+static_assert(std::is_abstract_v<iris::media::transport::Transport>);
+static_assert(std::is_abstract_v<iris::media::transport::RTPTransport>);
 static_assert(!std::is_abstract_v<
-              iris::media::v2::FFmpegCodecFactory>);
-static_assert(!std::is_abstract_v<iris::media::v2::RTPTransport>);
+              iris::media::pipeline::CaptureAudioStream>);
 static_assert(!std::is_abstract_v<
-              iris::media::v2::AudioEncodedStream>);
+              iris::media::pipeline::CaptureVideoStream>);
 static_assert(!std::is_abstract_v<
-              iris::media::v2::VideoEncodedStream>);
-static_assert(!std::is_abstract_v<iris::media::v2::MediaControl>);
+              iris::media::pipeline::RtpMediaStream>);
 static_assert(!std::is_abstract_v<
-              iris::media::v2::SDPMediaControl>);
-static_assert(!std::is_abstract_v<iris::media::v2::SdpBuilder>);
-static_assert(!std::is_abstract_v<iris::media::v2::SdpParser>);
-static_assert(!std::is_abstract_v<iris::media::v2::SdpNegotiator>);
+              iris::media::capture::EmptyAudioCaptureSource>);
+static_assert(!std::is_abstract_v<
+              iris::media::capture::EmptyVideoCaptureSource>);
+static_assert(!std::is_abstract_v<
+              iris::media::capture::FFmpegAudioCaptureSource>);
+static_assert(!std::is_abstract_v<
+              iris::media::capture::FFmpegVideoCaptureSource>);
+static_assert(!std::is_abstract_v<
+              iris::media::transport::RTPEngine>);
+static_assert(!std::is_abstract_v<iris::media::control::MediaControl>);
+static_assert(!std::is_abstract_v<
+              iris::media::control::SdpMediaControl>);
 
 int main() {
     return 0;

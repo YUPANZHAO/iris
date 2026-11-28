@@ -146,10 +146,6 @@ iris::RuntimeConfig runtime_config(const Json& value) {
             media->value("audioEnabled", config.media.audioEnabled);
         config.media.videoEnabled =
             media->value("videoEnabled", config.media.videoEnabled);
-        config.media.renderAudio =
-            media->value("renderAudio", config.media.renderAudio);
-        config.media.renderVideo =
-            media->value("renderVideo", false);
         config.media.mediaAddress =
             media->value("mediaAddress", config.media.mediaAddress);
         config.media.audioInput =

@@ -44,8 +44,6 @@ $common = @(
     "--audio-input", "null",
     "--video-input", "null",
     "--no-video",
-    "--no-audio-render",
-    "--no-video-render",
     "--log-level", "3"
 )
 
